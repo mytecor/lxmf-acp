@@ -23,8 +23,8 @@ type LXMFClient interface {
 	Close() error
 	SendFrom(localDestHash, recipientHash []byte, title, content string) error
 	Send(recipientHash []byte, title, content string) error
-	// SendMessage sends a message with LXMF fields and returns its hash once
-	// it is DELIVERED.
+	// SendMessage returns its hash after durable acceptance when configured,
+	// or after delivery proof for synchronous clients.
 	SendMessage(localDestHash, recipientHash []byte, msg lxmf.OutboundMessage) ([]byte, error)
 	RegisterIdentity(identity *rns.Identity) error
 	Hash() []byte
@@ -50,13 +50,16 @@ type ACPClient interface {
 }
 
 type Bridge struct {
-	cfg        *config.Config
-	lxmfClient LXMFClient
-	acpClient  ACPClient
-	store      *storage.Store
-	sessions   *SessionManager
-	queue      *QueueManager
-	assembler  *Assembler
+	cfg             *config.Config
+	lxmfClient      LXMFClient
+	acpClient       ACPClient
+	store           *storage.Store
+	sessions        *SessionManager
+	queue           *QueueManager
+	assembler       *Assembler
+	delivery        *storage.DeliveryStore
+	reliabilityDone chan struct{}
+	assemblyMu      sync.Mutex
 
 	// Outbound part limits (zero selects the defaults).
 	maxPartUnits int
@@ -154,6 +157,12 @@ func (b *Bridge) Start(ctx context.Context) error {
 		}
 	}
 
+	if b.delivery != nil {
+		if err := b.recoverIncoming(); err != nil {
+			return fmt.Errorf("recover incoming requests: %w", err)
+		}
+	}
+
 	// 5. Register inbound message handler
 	context.AfterFunc(ctx, b.queue.Close)
 	b.lxmfClient.SetMessageHandler(func(msg *lxmf.InboundMessage) {
@@ -162,6 +171,9 @@ func (b *Bridge) Start(ctx context.Context) error {
 
 	// 6. Register announce handler to persist peer identities
 	b.lxmfClient.SetAnnounceHandler(func(a *rns.Announce) {
+		if w, ok := b.lxmfClient.(interface{ WakeDelivery([]byte) }); ok {
+			w.WakeDelivery(a.DestHash)
+		}
 		snapshot := b.lxmfClient.KnownSnapshot()
 		if len(snapshot) > 0 {
 			_ = b.store.SaveKnownIdentities(snapshot)
@@ -204,6 +216,11 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 	if len(pinned) > 0 {
 		b.lxmfClient.PinDestinations(pinned)
+	}
+
+	if b.delivery != nil {
+		b.reliabilityDone = make(chan struct{})
+		go func() { defer close(b.reliabilityDone); b.pumpIncoming(b.queue.ctx) }()
 	}
 
 	// 10. Periodically discard incomplete inbound multipart chains
@@ -309,12 +326,33 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 	if err := b.store.TouchChat(localHex, now); err != nil {
 		log.Printf("[Bridge] Save chat activity: %v", err)
 	}
+	if w, ok := b.lxmfClient.(interface{ WakeDelivery([]byte) }); ok {
+		w.WakeDelivery(msg.SenderHash)
+	}
+	accepted, err := b.persistIncoming(msg)
+	if err != nil {
+		log.Printf("[Inbox] Cannot save request %x: %v", msg.MessageID, err)
+		return
+	}
+	if !accepted {
+		return
+	}
+	if b.delivery != nil {
+		if err := b.assembleSavedChat(chatKeyOf(msg)); err != nil {
+			log.Printf("[Inbox] Cannot assemble saved request: %v", err)
+		}
+		return
+	}
 	// Reassemble multipart chains; only complete prompts reach the queue.
 	ready := b.assembler.Process(msg)
 	if ready == nil {
 		return
 	}
 
+	if err := b.readyIncoming(ready); err != nil {
+		log.Printf("[Inbox] Cannot save assembled request: %v", err)
+		return
+	}
 	b.queue.Enqueue(ready)
 }
 
@@ -609,6 +647,9 @@ func (b *Bridge) handleWhitelistCommand(msg *lxmf.InboundMessage) {
 
 func (b *Bridge) Close() error {
 	b.queue.Close()
+	if b.reliabilityDone != nil {
+		<-b.reliabilityDone
+	}
 	if snapshot := b.lxmfClient.KnownSnapshot(); len(snapshot) > 0 {
 		_ = b.store.SaveKnownIdentities(snapshot)
 	}

@@ -24,13 +24,9 @@ type outPart struct {
 
 // replyStream turns a streamed ACP reply into a chain of LXMF messages.
 //
-// Text is segmented incrementally; finished parts are queued in RAM and
-// delivered by a single sender goroutine, so there is at most one
-// unconfirmed LXMF message per chat. Each part is sent only after the
-// previous one reached DELIVERED, and its FIELD_CONTINUATION references the
-// hash of that confirmed message. A delivery failure stops the chain.
-//
-// There is deliberately no backpressure towards ACP: Write never blocks.
+// Production streams synchronously commit each finished part to the durable
+// outbox. This applies disk backpressure only; network delivery runs separately.
+// Clients without an outbox use a sequential sender, primarily in tests.
 type replyStream struct {
 	client     LXMFClient
 	localHash  []byte
@@ -49,7 +45,10 @@ type replyStream struct {
 	hasNotices bool
 	err        error
 
-	done chan struct{}
+	done    chan struct{}
+	durable bool
+	prev    []byte
+	first   bool
 }
 
 func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string, replyTo []byte, replyQuote string, seg *Segmenter) *replyStream {
@@ -64,9 +63,14 @@ func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string,
 		replyQuote: replyQuote,
 		seg:        seg,
 		done:       make(chan struct{}),
+		first:      true,
 	}
 	s.cond = sync.NewCond(&s.mu)
-	go s.run()
+	if d, ok := client.(interface{ DurableDelivery() bool }); ok && d.DurableDelivery() {
+		s.durable = true
+	} else {
+		go s.run()
+	}
 	return s
 }
 
@@ -100,7 +104,14 @@ func (s *replyStream) Notice(title, content string, fields map[any]any) {
 		parts = append(parts, rest)
 	}
 	for _, part := range parts {
-		s.queue = append(s.queue, outPart{title: title, content: part, notice: true, fields: fields})
+		p := outPart{title: title, content: part, notice: true, fields: fields}
+		if s.durable {
+			if err := s.deliver(p); err != nil {
+				log.Printf("[Outbox] Optional notice not queued: %v", err)
+			}
+		} else {
+			s.queue = append(s.queue, p)
+		}
 	}
 	s.hasNotices = true
 	s.cond.Broadcast()
@@ -139,6 +150,9 @@ func (s *replyStream) Finish(status lxmf.Status, errTitle, errText string) {
 	// Otherwise (cancelled/failed without any text): nothing to send.
 
 	s.finished = true
+	if s.durable {
+		close(s.done)
+	}
 	s.cond.Broadcast()
 }
 
@@ -151,7 +165,13 @@ func (s *replyStream) Wait() error {
 }
 
 func (s *replyStream) enqueueLocked(p outPart) {
-	s.queue = append(s.queue, p)
+	if s.durable {
+		if s.err == nil {
+			s.err = s.deliver(p)
+		}
+	} else {
+		s.queue = append(s.queue, p)
+	}
 	s.enqueued++
 	s.cond.Broadcast()
 }
@@ -187,56 +207,55 @@ func (s *replyStream) failed() bool {
 func (s *replyStream) run() {
 	defer close(s.done)
 
-	var prev []byte
-	first := true
 	for {
 		p, ok := s.next()
 		if !ok {
 			return
 		}
 		if s.failed() {
-			continue // drain: never send parts after a delivery failure
-		}
-
-		single := first && p.final
-		var status lxmf.Status
-		if p.final {
-			status = p.status
-		}
-		baseFields := map[any]any{lxmf.FieldRenderer: lxmf.RendererMarkdown}
-		if first && len(s.replyTo) > 0 {
-			baseFields = lxmf.WithReplyTo(baseFields, s.replyTo, s.replyQuote)
-			log.Printf("[Bridge] Attaching reply metadata for %s: replyTo=%x, replyQuote=%q",
-				hex.EncodeToString(s.peerHash), s.replyTo, s.replyQuote)
-		}
-		fields := lxmf.BuildMultipartFields(baseFields, prev, first && !p.final, status)
-		if p.notice {
-			fields = lxmf.WithRenderer(p.fields, lxmf.RendererPlain)
-			if len(s.replyTo) > 0 {
-				fields = lxmf.WithReplyTo(fields, s.replyTo, s.replyQuote)
-			}
-		}
-
-		id, err := s.client.SendMessage(s.localHash, s.peerHash, lxmf.OutboundMessage{
-			Title:   p.title,
-			Content: p.content,
-			Fields:  fields,
-			Direct:  p.notice || !single, // multipart chains always use LXMF DIRECT
-		})
-		if err == nil && len(id) == 0 && !p.final && !p.notice {
-			err = errors.New("delivery returned no message hash")
-		}
-		if err != nil {
-			log.Printf("[Bridge] Delivery of reply part from %s to %s failed, aborting remaining parts: %v",
-				hex.EncodeToString(s.localHash), hex.EncodeToString(s.peerHash), err)
-			s.fail(err)
 			continue
 		}
-		if !p.notice {
-			prev = id
-			first = false
+		if err := s.deliver(p); err != nil {
+			if p.notice {
+				log.Printf("[Bridge] Optional tool notice failed: %v", err)
+				continue
+			}
+			s.fail(err)
 		}
 	}
+}
+
+// deliver runs on one goroutine, or synchronously under mu for durable streams.
+// Durable writes finish before accepting more ACP text, without waiting on the network.
+func (s *replyStream) deliver(p outPart) error {
+	single := s.first && p.final
+	var status lxmf.Status
+	if p.final {
+		status = p.status
+	}
+	baseFields := map[any]any{lxmf.FieldRenderer: lxmf.RendererMarkdown}
+	if s.first && len(s.replyTo) > 0 {
+		baseFields = lxmf.WithReplyTo(baseFields, s.replyTo, s.replyQuote)
+	}
+	fields := lxmf.BuildMultipartFields(baseFields, s.prev, s.first && !p.final, status)
+	if p.notice {
+		fields = lxmf.WithRenderer(p.fields, lxmf.RendererPlain)
+		if len(s.replyTo) > 0 {
+			fields = lxmf.WithReplyTo(fields, s.replyTo, s.replyQuote)
+		}
+	}
+	id, err := s.client.SendMessage(s.localHash, s.peerHash, lxmf.OutboundMessage{Title: p.title, Content: p.content, Fields: fields, Direct: !p.notice && !single, Notice: p.notice})
+	if err == nil && len(id) == 0 && !p.final && !p.notice {
+		err = errors.New("delivery returned no message hash")
+	}
+	if err != nil {
+		return err
+	}
+	if !p.notice {
+		s.prev = id
+		s.first = false
+	}
+	return nil
 }
 
 // limitText truncates text to a single LXMF part (used for short notices).

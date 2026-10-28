@@ -66,3 +66,29 @@ func TestAdminConfig(t *testing.T) {
 		t.Errorf("unexpected admin: %s", cfg.Admin)
 	}
 }
+
+func TestDeliveryOptionsRespectExplicitFlagsAndRejectInvalidNode(t *testing.T) {
+	old := flag.CommandLine
+	defer func() { flag.CommandLine = old }()
+	flag.CommandLine = flag.NewFlagSet("delivery", flag.ContinueOnError)
+	cfg := &Config{}
+	registerDeliveryFlags(cfg)
+	t.Setenv("LXMF_ACP_DELIVERY_TIMEOUT", "3m")
+	t.Setenv("LXMF_ACP_DELIVERY_RETRY_MIN", "20s")
+	t.Setenv("LXMF_ACP_PROPAGATION_NODE", "<00112233445566778899aabbccddeeff>")
+	if err := flag.CommandLine.Parse([]string{"--delivery-timeout=45s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyDeliveryEnv(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DeliveryTimeout != 45*time.Second || cfg.DeliveryRetryMin != 20*time.Second || cfg.PropagationNode != "00112233445566778899aabbccddeeff" {
+		t.Fatal("delivery precedence failed", cfg)
+	}
+	if err := flag.Set("propagation-node", "short"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyDeliveryEnv(cfg); err == nil {
+		t.Fatal("invalid node accepted")
+	}
+}

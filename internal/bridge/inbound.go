@@ -36,6 +36,7 @@ type assembly struct {
 	replyTo    []byte
 	replyQuote string
 	updated    time.Time
+	parts      [][]byte
 }
 
 // orphan is a continuation part whose predecessor has not been seen yet
@@ -142,6 +143,7 @@ func (a *Assembler) Process(msg *lxmf.InboundMessage) *lxmf.InboundMessage {
 			replyTo:    append([]byte(nil), replyTo...),
 			replyQuote: replyQuote,
 			updated:    now,
+			parts:      [][]byte{append([]byte(nil), msg.MessageID...)},
 		}
 		asm.text.WriteString(msg.Content)
 		a.byTail[linkKey(chatKey, asm.lastID)] = asm
@@ -173,6 +175,7 @@ func (a *Assembler) appendLocked(asm *assembly, msg *lxmf.InboundMessage, info l
 	}
 
 	asm.text.WriteString(msg.Content)
+	asm.parts = append(asm.parts, append([]byte(nil), msg.MessageID...))
 	asm.updated = now
 
 	if info.Status != "" {
@@ -203,6 +206,7 @@ func (a *Assembler) appendLocked(asm *assembly, msg *lxmf.InboundMessage, info l
 			Title:      asm.title,
 			Content:    asm.text.String(),
 			Multipart:  true,
+			Parts:      asm.parts,
 			Renderer:   asm.renderer,
 			Fields:     fields,
 			ReplyTo:    asm.replyTo,

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -24,6 +25,13 @@ type Config struct {
 	LinkIdleTimeout      time.Duration
 	QueueIdleTimeout     time.Duration
 	ChatIdleTimeout      time.Duration
+	DeliveryPath         string
+	PropagationNode      string
+	DeliveryTimeout      time.Duration
+	DeliveryRetryMin     time.Duration
+	DeliveryRetryMax     time.Duration
+	DeliveryWorkers      int
+	DeliveryMaxBytes     int64
 }
 
 func Parse() *Config {
@@ -42,10 +50,14 @@ func Parse() *Config {
 	flag.DurationVar(&cfg.QueueIdleTimeout, "queue-idle-timeout", 5*time.Minute, "Release idle conversation workers and detach Hydra sessions (0 disables)")
 	flag.DurationVar(&cfg.ChatIdleTimeout, "chat-idle-timeout", 24*time.Hour, "Stop periodic announces for inactive dynamic chats (0 disables)")
 
+	registerDeliveryFlags(cfg)
 	var allowlistStr string
 	flag.StringVar(&allowlistStr, "allowlist", "", "Comma-separated list of allowed peer destination hashes (empty allows all)")
 
 	flag.Parse()
+	if err := applyDeliveryEnv(cfg); err != nil {
+		log.Fatal(err)
+	}
 	if err := applyLifecycleEnv(cfg); err != nil {
 		log.Fatal(err)
 	}
@@ -148,4 +160,44 @@ func (c *Config) IsAllowed(peerHex string) bool {
 		}
 	}
 	return false
+}
+
+func applyDeliveryEnv(c *Config) error {
+	for _, name := range []string{"delivery-db", "propagation-node", "delivery-timeout", "delivery-retry-min", "delivery-retry-max", "delivery-workers", "delivery-max-bytes"} {
+		explicit := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == name {
+				explicit = true
+			}
+		})
+		if !explicit {
+			env := "LXMF_ACP_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+			if value := os.Getenv(env); value != "" {
+				if err := flag.Set(name, value); err != nil {
+					return fmt.Errorf("%s: %w", env, err)
+				}
+			}
+		}
+	}
+	if c.DeliveryTimeout <= 0 || c.DeliveryRetryMin <= 0 || c.DeliveryRetryMax < c.DeliveryRetryMin || c.DeliveryWorkers < 1 || c.DeliveryMaxBytes < 1 {
+		return fmt.Errorf("delivery timeout, retry intervals, workers and byte budget must be positive; retry-max must be >= retry-min")
+	}
+	c.PropagationNode = strings.ToLower(strings.Trim(c.PropagationNode, "<> \t\r\n"))
+	if c.PropagationNode != "" {
+		raw, err := hex.DecodeString(c.PropagationNode)
+		if err != nil || len(raw) != 16 {
+			return fmt.Errorf("propagation-node must be a 16-byte destination hash")
+		}
+	}
+	return nil
+}
+
+func registerDeliveryFlags(cfg *Config) {
+	flag.StringVar(&cfg.DeliveryPath, "delivery-db", "", "Pending delivery database (default: <state>.delivery.db)")
+	flag.StringVar(&cfg.PropagationNode, "propagation-node", "", "Optional LXMF propagation destination hash for offline delivery")
+	flag.DurationVar(&cfg.DeliveryTimeout, "delivery-timeout", 45*time.Second, "Per-attempt delivery budget; increase for slow radio routes")
+	flag.DurationVar(&cfg.DeliveryRetryMin, "delivery-retry-min", 15*time.Second, "Initial outgoing retry interval")
+	flag.DurationVar(&cfg.DeliveryRetryMax, "delivery-retry-max", 15*time.Minute, "Maximum outgoing retry interval")
+	flag.IntVar(&cfg.DeliveryWorkers, "delivery-workers", 4, "Maximum concurrent outgoing conversations")
+	flag.Int64Var(&cfg.DeliveryMaxBytes, "delivery-max-bytes", 128<<20, "Maximum retained outgoing envelope bytes")
 }

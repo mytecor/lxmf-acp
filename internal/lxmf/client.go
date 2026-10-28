@@ -24,6 +24,8 @@ type InboundMessage struct {
 	// Multipart is set by the bridge when Content is the reassembled text
 	// of a multipart LXMF chain rather than a single wire message.
 	Multipart bool
+	// Parts lists all component IDs of an assembled prompt for durable deduplication.
+	Parts [][]byte
 	// Renderer indicates the content renderer hint (e.g. RendererMarkdown).
 	// Set to -1 if no renderer field was present.
 	Renderer int
@@ -53,6 +55,10 @@ type OutboundMessage struct {
 	// letting the library pick opportunistic delivery for small payloads.
 	// It never falls back to PROPAGATED.
 	Direct bool
+	// Notice marks expendable tool progress, which cannot block durable answers.
+	Notice bool
+	// Control is a durable command response that can bypass a blocked answer chain.
+	Control bool
 }
 
 // Direct-delivery retry policy. A packed message is retransmitted with the
@@ -79,6 +85,8 @@ type Client struct {
 	linkIdleTimeout time.Duration
 	chatIdleTimeout time.Duration
 	cancel          context.CancelFunc
+	outbox          *deliveryQueue
+	outboxStarted   bool
 
 	OnMessage  MessageHandler
 	OnError    func(error)
@@ -183,6 +191,10 @@ func (c *Client) Start(ctx context.Context) error {
 	c.mu.Unlock()
 
 	go c.transport.Run(ctx)
+	if c.outbox != nil {
+		c.outboxStarted = true
+		go c.outbox.run(ctx)
+	}
 	go c.transport.RunLinkSweeper(ctx)
 
 	// Restored dormant identities must also stay quiet across restarts.
@@ -356,6 +368,10 @@ func (c *Client) Announce() {
 
 // SendFrom sends an LXMF message originating from the specified local destination identity.
 func (c *Client) SendFrom(localDestHash, recipientHash []byte, title, content string) error {
+	if c.outbox != nil {
+		_, err := c.QueueMessage(localDestHash, recipientHash, OutboundMessage{Title: title, Content: content, Control: true})
+		return err
+	}
 	c.touchIdentity(localDestHash)
 	defer c.touchIdentity(localDestHash)
 	c.mu.RLock()
@@ -383,10 +399,13 @@ func (c *Client) SendFrom(localDestHash, recipientHash []byte, title, content st
 }
 
 // SendMessage sends an LXMF message (with optional fields) from the given
-// local destination and returns its LXMF message hash. It returns only after
-// the recipient's delivery proof has arrived (state DELIVERED); a message
-// that merely left the local interface (SENT) is not reported as success.
+// local destination. With durable delivery it returns the fixed hash after
+// committing to disk; the dispatcher records delivery separately. Without an
+// outbox it waits for the recipient's delivery proof.
 func (c *Client) SendMessage(localDestHash, recipientHash []byte, m OutboundMessage) ([]byte, error) {
+	if c.outbox != nil {
+		return c.QueueMessage(localDestHash, recipientHash, m)
+	}
 	c.touchIdentity(localDestHash)
 	defer c.touchIdentity(localDestHash)
 	c.mu.RLock()
@@ -504,14 +523,19 @@ func (c *Client) HexHash() string {
 
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
+	cancel, iface := c.cancel, c.tcpIface
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
-	if c.tcpIface != nil {
-		return c.tcpIface.Close()
+	var err error
+	if iface != nil {
+		err = iface.Close()
 	}
-	return nil
+	if c.outboxStarted {
+		<-c.outbox.done
+	}
+	return err
 }
 
 type clientAnnounceHandler struct {
@@ -555,6 +579,9 @@ func (c *Client) PinDestinations(destHashes [][]byte) {
 	t := c.transport
 	c.mu.RUnlock()
 	if t != nil {
+		if c.outbox != nil && len(c.outbox.opts.PropagationNode) > 0 {
+			destHashes = append(append([][]byte(nil), destHashes...), c.outbox.opts.PropagationNode)
+		}
 		t.PinDestinations(destHashes)
 	}
 }

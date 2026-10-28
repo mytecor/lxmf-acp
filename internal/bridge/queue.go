@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mytecor/lxmf-acp/internal/acp"
 	"github.com/mytecor/lxmf-acp/internal/lxmf"
 )
 
@@ -31,6 +32,7 @@ type QueueManager struct {
 	bridge  *Bridge
 	ctx     context.Context
 	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 func NewQueueManager(bridge *Bridge) *QueueManager {
@@ -53,6 +55,16 @@ func (qm *QueueManager) Enqueue(msg *lxmf.InboundMessage) {
 	if qm.ctx.Err() != nil {
 		return
 	}
+	if qm.bridge.delivery != nil {
+		claimed, err := qm.bridge.delivery.TransitionIncoming(queueKey, msg.MessageID, "queued", "scheduled")
+		if err != nil {
+			log.Printf("[Inbox] Cannot schedule request: %v", err)
+			return
+		}
+		if !claimed {
+			return
+		}
+	}
 	q, ok := qm.workers[queueKey]
 	if !ok {
 		q = &peerQueue{
@@ -64,16 +76,30 @@ func (qm *QueueManager) Enqueue(msg *lxmf.InboundMessage) {
 			bridge:    qm.bridge,
 		}
 		qm.workers[queueKey] = q
-		go q.run()
+		qm.wg.Add(1)
+		go func() { defer qm.wg.Done(); q.run() }()
+	}
+	// Cancellation must not wait behind the prompt it is meant to cancel.
+	if strings.TrimSpace(msg.Content) == "/bridge cancel" {
+		qm.wg.Add(1)
+		go func() { defer qm.wg.Done(); q.processMessage(msg) }()
+		return
 	}
 	select {
 	case q.ch <- msg:
 	default:
-		log.Printf("[Queue] Warning: message queue full for conversation (%s, %s), dropping message", localHex, peerHex)
+		if qm.bridge.delivery != nil {
+			_, err := qm.bridge.delivery.TransitionIncoming(queueKey, msg.MessageID, "scheduled", "queued")
+			if err != nil {
+				log.Printf("[Inbox] Cannot defer request: %v", err)
+			}
+		} else {
+			log.Printf("[Queue] Warning: message queue full for conversation (%s, %s), dropping message", localHex, peerHex)
+		}
 	}
 }
 
-func (qm *QueueManager) Close() { qm.cancel() }
+func (qm *QueueManager) Close() { qm.mu.Lock(); qm.cancel(); qm.mu.Unlock(); qm.wg.Wait() }
 
 func (q *peerQueue) run() {
 	log.Printf("[Queue] Worker started for conversation (%s, %s)", q.localHex, q.peerHex)
@@ -145,6 +171,37 @@ func (q *peerQueue) detachSession(ctx context.Context) error {
 }
 
 func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
+	if q.bridge.queue.ctx.Err() != nil {
+		return
+	}
+	requestState := "done"
+	if q.bridge.delivery != nil {
+		key := incomingChat(msg.LocalHash, msg.SenderHash)
+		claimed, err := q.bridge.delivery.TransitionIncoming(key, msg.MessageID, "scheduled", "running")
+		if err != nil {
+			log.Printf("[Inbox] Cannot start request: %v", err)
+			return
+		}
+		if !claimed {
+			return
+		}
+		defer func() {
+			if q.bridge.queue.ctx.Err() != nil {
+				requestState = "uncertain"
+			}
+			_, err := q.bridge.delivery.TransitionIncoming(key, msg.MessageID, "running", requestState)
+			if err != nil {
+				log.Printf("[Inbox] Cannot finish request: %v", err)
+			}
+		}()
+	}
+	if q.bridge.delivery != nil {
+		owner, found := q.bridge.store.GetChat(q.localHex)
+		if !q.bridge.isAllowed(q.peerHex) || !found || !strings.EqualFold(owner.Owner, q.peerHex) {
+			log.Printf("[Inbox] Rejected saved request for %s: authorization changed", q.localHex)
+			return
+		}
+	}
 	text := strings.TrimSpace(msg.Content)
 	if text == "" {
 		return
@@ -168,7 +225,7 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 			forwarded = true
 		} else {
 			switch verb {
-			case "help", "new", "cancel", "tools", "tool", "allow", "revoke", "whitelist", "allowlist":
+			case "help", "new", "cancel", "tools", "tool", "allow", "revoke", "whitelist", "allowlist", "delivery", "retry", "recover":
 				localCommand = true
 				text = "/" + payload
 				copyMsg := *msg
@@ -193,7 +250,7 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	log.Printf("[Queue] Processing message for %s from %s (id: %x, isReply: %v, replyTo: %x, replyQuote: %q): %q",
 		q.localHex, q.peerHex, msg.MessageID, msg.IsReply(), msg.ReplyTo, msg.ReplyQuote, text)
 
-	if localCommand && q.toolCommand(text) {
+	if localCommand && (q.deliveryCommand(text) || q.toolCommand(text)) {
 		return
 	}
 
@@ -204,7 +261,10 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 			"- `/bridge cancel` — Cancel current generation\n" +
 			"- `/bridge help` — Show this message\n" +
 			"- `/bridge tools off|compact|verbose` — Set tool display for this chat\n" +
-			"- `/bridge tool <number>` — Show details of a recent tool call\n\n" +
+			"- `/bridge tool <number>` — Show details of a recent tool call\n" +
+			"- `/bridge delivery` — Show pending delivery and interrupted requests\n" +
+			"- `/bridge retry` — Retry pending deliveries\n" +
+			"- `/bridge recover` — Retrieve saved text from an interrupted request\n\n" +
 			"Only `/bridge` commands run locally; all other commands go upstream.\n" +
 			"Upstream commands pass through: `/hydra` lists Hydra commands; `/hydra kill` stops its agent while retaining history; `/hydra restart` restarts it.\n" +
 			"Use `/bridge forward <text or command>` to send text upstream verbatim."
@@ -263,6 +323,7 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	// Regular message -> send to ACP
 	sessionID, err := q.bridge.sessions.GetOrCreateSession(ctx, q.localHex, q.peerHex)
 	if err != nil {
+		requestState = "uncertain"
 		log.Printf("[Bridge] Error getting session for (%s, %s): %v", q.localHex, q.peerHex, err)
 		_ = q.bridge.lxmfClient.SendFrom(q.localHash, q.peerHash, "Error", "Could not create or retrieve ACP session.")
 		return
@@ -298,7 +359,20 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	}
 	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "", replyToID, replyQuote)
 	reporter := newToolReporter(stream, q.bridge.store, toolBatchInterval)
-	stopReason, err := q.bridge.acpClient.PromptEvents(promptCtx, sessionID, promptText, reporter.Event)
+	stopReason, err := q.bridge.acpClient.PromptEvents(promptCtx, sessionID, promptText, func(event acp.Event) {
+		if q.bridge.delivery != nil && event.Text != "" {
+			if err := q.bridge.delivery.AppendOutput(incomingChat(msg.LocalHash, msg.SenderHash), msg.MessageID, event.Text); err != nil {
+				requestState = "uncertain"
+				log.Printf("[Inbox] Cannot journal agent text: %v", err)
+				cancel()
+				return
+			}
+		}
+		reporter.Event(event)
+		if stream.failed() {
+			cancel()
+		}
+	})
 	reporter.Finish(stopReason == stopReasonCancelled || errors.Is(err, context.Canceled))
 	switch {
 	case err == nil && stopReason == stopReasonCancelled:
@@ -310,13 +384,19 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 		log.Printf("[Bridge] Prompt cancelled for (%s, %s)", q.localHex, q.peerHex)
 		stream.Finish(lxmf.StatusCancelled, "", "")
 	default:
+		requestState = "uncertain"
 		log.Printf("[Bridge] Prompt error for (%s, %s) (session %s): %v", q.localHex, q.peerHex, sessionID, err)
 		stream.Finish(lxmf.StatusFailed, "Agent Error", fmt.Sprintf("Error from agent: %v", err))
 	}
 
 	if err := stream.Wait(); err != nil {
+		requestState = "uncertain"
 		log.Printf("[Bridge] Error sending reply from %s to %s: %v", q.localHex, q.peerHex, err)
 		return
 	}
-	log.Printf("[Bridge] Agent reply from %s to %s delivered", q.localHex, q.peerHex)
+	if d, ok := q.bridge.lxmfClient.(interface{ DurableDelivery() bool }); ok && d.DurableDelivery() {
+		log.Printf("[Bridge] Agent reply from %s to %s committed to outbox", q.localHex, q.peerHex)
+	} else {
+		log.Printf("[Bridge] Agent reply from %s to %s delivered", q.localHex, q.peerHex)
+	}
 }

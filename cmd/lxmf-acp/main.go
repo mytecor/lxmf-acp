@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -36,6 +37,18 @@ func main() {
 	}
 	log.Printf("State file:    %s", cfg.StatePath)
 
+	// Pending traffic is isolated from the small identity/config state file.
+	deliveryPath := cfg.DeliveryPath
+	if deliveryPath == "" {
+		deliveryPath = cfg.StatePath + ".delivery.db"
+	}
+	deliveries, err := storage.OpenDeliveryStore(deliveryPath)
+	if err != nil {
+		log.Fatalf("Fatal: failed to open delivery database: %v", err)
+	}
+	defer deliveries.Close()
+	deliveries.MaxPendingBytes = cfg.DeliveryMaxBytes
+	log.Printf("Delivery database: %s", deliveryPath)
 	// 3. ACP Client
 	acpClient := acp.NewClient(cfg.ACPEndpoint)
 	log.Printf("ACP Endpoint:  %s", cfg.ACPEndpoint)
@@ -46,6 +59,8 @@ func main() {
 		log.Fatalf("Fatal: failed to create LXMF client: %v", err)
 	}
 	lxmfClient.ConfigureLifecycle(cfg.LinkIdleTimeout, cfg.ChatIdleTimeout)
+	node, _ := hex.DecodeString(cfg.PropagationNode)
+	lxmfClient.ConfigureDelivery(deliveries, lxmf.DeliveryOptions{Workers: cfg.DeliveryWorkers, RetryMin: cfg.DeliveryRetryMin, RetryMax: cfg.DeliveryRetryMax, SendTimeout: cfg.DeliveryTimeout, PropagationNode: node})
 	log.Printf("RNS Shared:    %s", cfg.RNSAddr)
 	log.Printf("Display Name:  %q", cfg.DisplayName)
 	log.Printf("Agent Address: %s", lxmfClient.HexHash())
@@ -64,6 +79,7 @@ func main() {
 
 	// 5. Bridge
 	b := bridge.NewBridge(cfg, lxmfClient, acpClient, store)
+	b.ConfigureReliability(deliveries)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

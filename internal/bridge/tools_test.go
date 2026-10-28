@@ -171,17 +171,23 @@ func TestToolCommandsAndPromptIntegration(t *testing.T) {
 	}
 }
 
-func TestToolDeliveryFailureStopsFollowingAnswer(t *testing.T) {
+func TestToolDeliveryFailureDoesNotStopFollowingAnswer(t *testing.T) {
 	reporter, stream, client, _ := reporterFixture(t, "compact", time.Hour)
-	client.sendHook = func(sent sentMsg) error { return errors.New("no receipt") }
+	client.sendHook = func(sent sentMsg) error {
+		if sent.Title == "Tools" {
+			return errors.New("no receipt")
+		}
+		return nil
+	}
 	reporter.Event(acp.Event{Tool: &acp.ToolUpdate{ID: "a", Status: toolString("completed")}})
 	reporter.Event(acp.Event{Text: "Answer"})
 	reporter.Finish(false)
 	stream.Finish(lxmf.StatusCompleted, "", "")
-	if err := stream.Wait(); err == nil {
-		t.Fatal("delivery failure lost")
+	if err := stream.Wait(); err != nil {
+		t.Fatal("optional notice blocked answer", err)
 	}
-	if len(client.getSent()) != 0 {
-		t.Fatal("answer delivered after failure")
+	sent := client.getSent()
+	if len(sent) != 1 || sent[0].Content != "Answer" {
+		t.Fatal("answer lost", sent)
 	}
 }

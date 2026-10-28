@@ -30,7 +30,7 @@ Sideband / Columba
 - **Access Control & Dynamic Whitelist**: Persistent whitelist stored in `state.json` with CLI `--allowlist` seeding. Unauthorized users are blocked, and when an admin adds a user, the bot initiates the conversation directly.
 - **Persistent State**: Stores each chat’s private key, owner, activity, and optional ACP session together in `chats`, with atomic writes. The peer cache is stored separately in `knownIdentities`.
 - **Multipart LXMF Streaming**: Transparently handles arbitrary-length responses via standard `FIELD_CONTINUATION (0x42)` and namespaced `FIELD_CUSTOM_META (0xFD)`. Segments text into parts under 10 000 UTF-16 units without breaking unicode/whitespace. Delivers sequentially via `LXMF DIRECT` during generation and reassembles incoming multipart chains from peer instances before invoking ACP. Compatible with Sideband, Columba, and Ratspeak.
-- **Tool Call Display**: Forwards ACP tool calls as plain-text activity messages readable in Ratspeak and Columba. Compact display is enabled by default; `/bridge tools off|compact|verbose` selects a persistent per-chat mode, and `/bridge tool <number>` retrieves details of a recent call. Fast calls are batched, long calls show progress, and tool messages share the answer delivery queue without joining its multipart chain.
+- **Tool Call Display**: Forwards ACP tool calls as plain-text activity messages readable in Ratspeak and Columba. Compact display is enabled by default; `/bridge tools off|compact|verbose` selects a persistent per-chat mode, and `/bridge tool <number>` retrieves details of a recent call. Fast calls are batched, long calls show progress, and optional tool notices never block the answer or join its multipart chain. Short notices use automatic packet/Link selection.
 - **Markdown Rendering**: Sets LXMF `FIELD_RENDERER (0x0F)` to `RENDERER_MARKDOWN (0x02)` across all agent responses, notifications, and commands. Compatible clients (such as Columba, Sideband, and MeshChat) render formatted markdown, lists, code blocks, and emphasis natively.
 - **Native Reply & Threading Support**: Supports standard LXMF reply fields (`FIELD_REPLY_TO 0x30` and `FIELD_REPLY_QUOTE 0x31`). When you reply to any message in client interfaces like Sideband, Columba, or MeshChat, the bridge passes the client-provided quote to the ACP agent and threads the agent's response back to your reply. Without a quote, the agent receives only the parent message ID. Message text is neither cached nor saved in the state file.
 
@@ -74,16 +74,42 @@ go build -o lxmf-acp ./cmd/lxmf-acp
 | `--link-idle-timeout` | `LXMF_ACP_LINK_IDLE_TIMEOUT` | `2m` | Close Reticulum links after network inactivity; must be positive |
 | `--queue-idle-timeout` | `LXMF_ACP_QUEUE_IDLE_TIMEOUT` | `5m` | Release idle conversation workers and detach Hydra subscriptions; `0` disables |
 | `--chat-idle-timeout` | `LXMF_ACP_CHAT_IDLE_TIMEOUT` | `24h` | Stop periodic announces for inactive dynamic chat addresses; `0` disables |
+| `--delivery-db` | `LXMF_ACP_DELIVERY_DB` | `<state>.delivery.db` | Durable pending traffic and request deduplication database |
+| `--delivery-timeout` | `LXMF_ACP_DELIVERY_TIMEOUT` | `45s` | Budget per transmission attempt; increase for slow radio routes |
+| `--delivery-retry-min` | `LXMF_ACP_DELIVERY_RETRY_MIN` | `15s` | Initial retry interval, with jitter |
+| `--delivery-retry-max` | `LXMF_ACP_DELIVERY_RETRY_MAX` | `15m` | Maximum retry interval |
+| `--delivery-workers` | `LXMF_ACP_DELIVERY_WORKERS` | `4` | Concurrent outgoing conversations |
+| `--delivery-max-bytes` | `LXMF_ACP_DELIVERY_MAX_BYTES` | `134217728` | Retained outgoing envelope budget; existing messages are never evicted |
+| `--propagation-node` | `LXMF_ACP_PROPAGATION_NODE` | *(empty)* | Optional `lxmf.propagation` destination for offline delivery |
 
-Durations use Go syntax such as `30s`, `5m`, or `48h`. Explicit lifecycle flags override environment values, including when the flag equals its default.
+Durations use Go syntax such as `30s`, `5m`, or `48h`. Explicit lifecycle and delivery flags override environment values, including when the flag equals its default.
+
+## Delivery and recovery
+
+Outgoing messages are signed and committed to a separate SQLite queue before transmission. Retries and restarts reuse the signed payload and LXMF message ID. A delivery-proof timeout retains the message; it does not prove that the recipient missed it. Small standalone messages initially use Opportunistic delivery; retries use a Link. Multipart answers keep stable predecessor hashes and are dispatched in order per conversation. Independent chats can progress concurrently.
+
+The queue retries with exponential backoff and jitter. Incoming traffic and announces accelerate retries. A successful recipient proof removes the pending payload. An interrupted transmission is retried after restart. Optional tool notices are coalesced, expire after one minute, and are discarded after a failed attempt or restart. They cannot abort the answer. Durable command responses can bypass a blocked answer chain.
+
+For offline delivery, configure `--propagation-node <destination>`. After three unsuccessful attempts, the bridge can forward the same signed message through that node. Submission is recorded separately from recipient delivery; the local copy remains retained. The recipient must retrieve messages from a propagation node that has them. New peer activity or `/bridge retry` also retries retained submissions directly. Without this setting, replies stay in the local queue until the peer becomes reachable. Direct Links support multi-hop routes; propagation is for store-and-forward availability, not a requirement for multiple hops.
+
+Incoming message IDs and incomplete multipart fragments are journaled. Queued requests resume after restart. Requests interrupted during execution become **uncertain** and are never automatically executed again, since an agent tool may already have changed external state. Generated text is journaled before segmentation and remains available for recovery when execution is interrupted. Successful request payloads are removed, while deduplication IDs remain.
+
+- `/bridge delivery` — show queued, blocked, forwarded and interrupted counts for this chat.
+- `/bridge retry` — retry retained messages, including blocked messages and propagation submissions.
+- `/bridge recover` — retrieve saved text from the latest interrupted request; this does not repeat its tools.
+- `/bridge cancel` — cancel generation without waiting behind that generation in the conversation queue.
+
+The database uses full synchronous commits, private file permissions and an exclusive writer lock. Keep it alongside the identity/state files when moving the service, and run only one bridge against it. The payload budget stops new output from being queued instead of deleting older undelivered messages; generated text remains available through recovery. It is not a cap on total database file size. Received fragments and uncertain output remain until resolved or the database is explicitly removed.
+
+Delivery proofs confirm transport receipt, not display or execution in a client. The current Reticulum library sends inbound transport proofs before the bridge's callback persists a request, leaving a crash window before journal acceptance. Stable message IDs enable duplicate suppression, but exactly-once display across arbitrary clients, or exactly-once agent execution across an interrupted external operation, cannot be guaranteed. Propagation submission likewise does not confirm receipt by the final user.
 
 ## Idle chats and Hydra session commands
 
 The bridge keeps one shared TCP connection to Reticulum so it can receive messages. Individual DIRECT links expire after network inactivity; an outgoing link is negotiated again when needed. Cleanup runs at most every 15 seconds. Local keepalives do not prolong unused outbound links; incoming traffic, including peer keepalives, refreshes the library's network inactivity clock.
 
-A conversation worker is released after its queue has been empty for `--queue-idle-timeout`, measured after processing and reply delivery finish. Active generation and delivery are not retired. With Hydra, the bridge sends `session/detach` for that conversation without closing the shared ACP WebSocket or other conversations. Hydra owns its agent-process idle policy (`sessionIdleTimeoutSeconds`; the pinned 0.1.183 default is one hour) and retains prompted conversations for resurrection. Other ACP agents do not receive Hydra-specific detach requests.
+A conversation worker is released after its queue has been empty for `--queue-idle-timeout`, measured after generation and durable queuing finish. Delivery continues independently after the conversation worker is released. With Hydra, the bridge sends `session/detach` for that conversation without closing the shared ACP WebSocket or other conversations. Hydra owns its agent-process idle policy (`sessionIdleTimeoutSeconds`; the pinned 0.1.183 default is one hour) and retains prompted conversations for resurrection. Other ACP agents do not receive Hydra-specific detach requests.
 
-After `--chat-idle-timeout`, a dynamic address stops sending unsolicited periodic announces, including after a bridge restart. The root address remains discoverable. Dormant addresses stay registered and answer Reticulum path requests, so a peer that knows an address can resume the chat. Accepted incoming messages and outgoing replies refresh activity. Older state files recover activity from creation dates, session dates, and retained messages. Legacy message history is removed from the state file on load after recovering activity timestamps. No identity keys, ownership records, or session mappings are automatically deleted; inactive chats still count toward the identity quota. Deleting a chat in an LXMF client does not notify the bridge.
+After `--chat-idle-timeout`, a dynamic address stops sending unsolicited periodic announces, including after a bridge restart. The root address remains discoverable. Dormant addresses stay registered and answer Reticulum path requests, so a peer that knows an address can resume the chat. Accepted incoming messages and outgoing replies refresh activity. No identity keys, ownership records, or session mappings are automatically deleted; inactive chats still count toward the identity quota. Deleting a chat in an LXMF client does not notify the bridge.
 
 Hydra commands pass through to Hydra as ordinary ACP prompts:
 
