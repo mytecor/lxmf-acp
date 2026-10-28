@@ -85,10 +85,10 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 
 	// Command: /help
 	if text == "/help" {
-		reply := "LXMF-ACP Agent Bridge commands:\n" +
-			"/new - Start a new chat with a fresh conversation session\n" +
-			"/cancel - Cancel current generation\n" +
-			"/help - Show this message"
+		reply := "**LXMF-ACP Agent Bridge commands:**\n\n" +
+			"- `/new` — Start a new chat with a fresh conversation session\n" +
+			"- `/cancel` — Cancel current generation\n" +
+			"- `/help` — Show this message"
 		_ = q.bridge.lxmfClient.SendFrom(q.localHash, q.peerHash, "Help", reply)
 		return
 	}

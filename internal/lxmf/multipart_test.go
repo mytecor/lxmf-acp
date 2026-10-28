@@ -146,3 +146,73 @@ func TestParsePlainMessageHasNoMultipart(t *testing.T) {
 		t.Fatalf("unexpected multipart detection: %v", info)
 	}
 }
+
+func TestRendererParsingAndModifying(t *testing.T) {
+	// 1. Missing field
+	if r, ok := ParseRenderer(nil); ok || r != -1 {
+		t.Fatalf("expected (-1, false), got (%d, %v)", r, ok)
+	}
+	if r, ok := ParseRenderer(map[any]any{"foo": "bar"}); ok || r != -1 {
+		t.Fatalf("expected (-1, false), got (%d, %v)", r, ok)
+	}
+
+	// 2. Integer variant key and values
+	cases := []struct {
+		name     string
+		fields   map[any]any
+		expected int
+	}{
+		{"int key & val", map[any]any{int(FieldRenderer): int(RendererMarkdown)}, RendererMarkdown},
+		{"int8 key & val", map[any]any{int8(FieldRenderer): int8(RendererMarkdown)}, RendererMarkdown},
+		{"uint8 key & val", map[any]any{uint8(FieldRenderer): uint8(RendererMarkdown)}, RendererMarkdown},
+		{"int64 key & val", map[any]any{int64(FieldRenderer): int64(RendererPlain)}, RendererPlain},
+		{"micron renderer", map[any]any{FieldRenderer: RendererMicron}, RendererMicron},
+		{"bbcode renderer", map[any]any{FieldRenderer: RendererBBCode}, RendererBBCode},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := ParseRenderer(tc.fields)
+			if !ok || r != tc.expected {
+				t.Fatalf("ParseRenderer(%v) = (%d, %v), want (%d, true)", tc.fields, r, ok, tc.expected)
+			}
+		})
+	}
+
+	// 3. WithRenderer
+	orig := map[any]any{
+		"unrelated": "preserved",
+		FieldRenderer: RendererPlain,
+	}
+	updated := WithRenderer(orig, RendererMarkdown)
+	if r, ok := ParseRenderer(updated); !ok || r != RendererMarkdown {
+		t.Fatalf("updated renderer = (%d, %v), want (%d, true)", r, ok, RendererMarkdown)
+	}
+	if updated["unrelated"] != "preserved" {
+		t.Fatalf("lost unrelated field: %v", updated)
+	}
+	// Original must not be mutated
+	if orig[FieldRenderer] != RendererPlain {
+		t.Fatalf("original mutated: %v", orig)
+	}
+
+	// 4. InboundMessage helper
+	inboundMd := &InboundMessage{Renderer: RendererMarkdown}
+	if !inboundMd.IsMarkdown() {
+		t.Fatalf("expected IsMarkdown() == true")
+	}
+	inboundPlain := &InboundMessage{Renderer: RendererPlain}
+	if inboundPlain.IsMarkdown() {
+		t.Fatalf("expected IsMarkdown() == false for plain")
+	}
+}
+
+func TestRendererRoundTrip(t *testing.T) {
+	fields := WithRenderer(nil, RendererMarkdown)
+	msg, _ := roundTrip(t, "# Hello Markdown\n\n- item 1\n- item 2", fields)
+
+	r, ok := ParseRenderer(msg.Fields)
+	if !ok || r != RendererMarkdown {
+		t.Fatalf("ParseRenderer after roundTrip = (%d, %v), want (%d, true)", r, ok, RendererMarkdown)
+	}
+}

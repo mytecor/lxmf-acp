@@ -169,7 +169,8 @@ func (s *replyStream) run() {
 		if p.final {
 			status = p.status
 		}
-		fields := lxmf.BuildMultipartFields(nil, prev, first && !p.final, status)
+		baseFields := map[any]any{lxmf.FieldRenderer: lxmf.RendererMarkdown}
+		fields := lxmf.BuildMultipartFields(baseFields, prev, first && !p.final, status)
 
 		id, err := s.client.SendMessage(s.localHash, s.peerHash, lxmf.OutboundMessage{
 			Title:   p.title,

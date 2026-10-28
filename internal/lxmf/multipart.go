@@ -18,6 +18,15 @@ import (
 )
 
 const (
+	// FieldRenderer is LXMF FIELD_RENDERER (0x0F).
+	FieldRenderer = 0x0F
+
+	// Standard LXMF message renderers for FieldRenderer.
+	RendererPlain    = 0x00
+	RendererMicron   = 0x01
+	RendererMarkdown = 0x02
+	RendererBBCode   = 0x03
+
 	// FieldContinuation is LXMF FIELD_CONTINUATION.
 	FieldContinuation = 0x42
 	// FieldCustomMeta is LXMF FIELD_CUSTOM_META.
@@ -159,6 +168,31 @@ func ParseMultipartFields(fields map[any]any) MultipartInfo {
 		}
 	}
 	return info
+}
+
+// ParseRenderer returns the renderer constant specified in FIELD_RENDERER,
+// or -1 and false if no valid renderer was found.
+func ParseRenderer(fields map[any]any) (int, bool) {
+	for k, v := range fields {
+		if intKey(k) == FieldRenderer {
+			if r := intKey(v); r >= 0 {
+				return r, true
+			}
+		}
+	}
+	return -1, false
+}
+
+// WithRenderer returns a copy of fields with FIELD_RENDERER set to renderer.
+func WithRenderer(fields map[any]any, renderer int) map[any]any {
+	out := make(map[any]any, len(fields)+1)
+	for k, v := range fields {
+		if intKey(k) != FieldRenderer {
+			out[k] = v
+		}
+	}
+	out[FieldRenderer] = renderer
+	return out
 }
 
 // intKey normalises msgpack-decoded integer keys (int8, uint8, int64, ...)

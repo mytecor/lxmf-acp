@@ -32,6 +32,7 @@ type assembly struct {
 	title     string
 	text      strings.Builder
 	lastID    []byte
+	renderer  int
 	updated   time.Time
 }
 
@@ -129,6 +130,7 @@ func (a *Assembler) Process(msg *lxmf.InboundMessage) *lxmf.InboundMessage {
 			peerHash:  append([]byte(nil), msg.SenderHash...),
 			title:     msg.Title,
 			lastID:    append([]byte(nil), msg.MessageID...),
+			renderer:  msg.Renderer,
 			updated:   now,
 		}
 		asm.text.WriteString(msg.Content)
@@ -168,6 +170,10 @@ func (a *Assembler) appendLocked(asm *assembly, msg *lxmf.InboundMessage, info l
 			log.Printf("[Multipart] Chain in chat %s ended with status %q; not prompting", asm.chatKey, info.Status)
 			return nil
 		}
+		var fields map[any]any
+		if asm.renderer >= 0 {
+			fields = map[any]any{lxmf.FieldRenderer: asm.renderer}
+		}
 		return &lxmf.InboundMessage{
 			LocalHash:  asm.localHash,
 			SenderHash: asm.peerHash,
@@ -175,6 +181,8 @@ func (a *Assembler) appendLocked(asm *assembly, msg *lxmf.InboundMessage, info l
 			Title:      asm.title,
 			Content:    asm.text.String(),
 			Multipart:  true,
+			Renderer:   asm.renderer,
+			Fields:     fields,
 		}
 	}
 

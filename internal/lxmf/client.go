@@ -24,6 +24,14 @@ type InboundMessage struct {
 	// Multipart is set by the bridge when Content is the reassembled text
 	// of a multipart LXMF chain rather than a single wire message.
 	Multipart bool
+	// Renderer indicates the content renderer hint (e.g. RendererMarkdown).
+	// Set to -1 if no renderer field was present.
+	Renderer int
+}
+
+// IsMarkdown reports whether the message explicitly specifies Markdown rendering.
+func (m *InboundMessage) IsMarkdown() bool {
+	return m.Renderer == RendererMarkdown
 }
 
 // OutboundMessage describes a single outbound LXMF message.
@@ -159,6 +167,7 @@ func (c *Client) registerDeliveryLocked(id *rns.Identity) error {
 			if len(locHash) == 0 {
 				locHash = destHash
 			}
+			renderer, _ := ParseRenderer(m.Fields)
 			msg := &InboundMessage{
 				LocalHash:  append([]byte(nil), locHash...),
 				SenderHash: append([]byte(nil), m.SourceHash...),
@@ -166,6 +175,7 @@ func (c *Client) registerDeliveryLocked(id *rns.Identity) error {
 				Title:      string(m.Title),
 				Content:    string(m.Content),
 				Fields:     m.Fields,
+				Renderer:   renderer,
 			}
 			handler(msg)
 		}
@@ -264,7 +274,10 @@ func (c *Client) SendFrom(localDestHash, recipientHash []byte, title, content st
 		return fmt.Errorf("delivery destination %s not found", localHex)
 	}
 
-	err := delivery.Send(recipientHash, []byte(title), []byte(content), nil)
+	fields := map[any]any{
+		FieldRenderer: RendererMarkdown,
+	}
+	err := delivery.Send(recipientHash, []byte(title), []byte(content), fields)
 	if err != nil {
 		if errors.Is(err, lxmf.ErrRecipientUnknown) && transport != nil {
 			_ = transport.RequestPath(recipientHash)
@@ -289,6 +302,10 @@ func (c *Client) SendMessage(localDestHash, recipientHash []byte, m OutboundMess
 
 	if !ok || delivery == nil || identity == nil || transport == nil {
 		return nil, fmt.Errorf("delivery destination %s not found", localHex)
+	}
+
+	if _, hasRenderer := ParseRenderer(m.Fields); !hasRenderer {
+		m.Fields = WithRenderer(m.Fields, RendererMarkdown)
 	}
 
 	if !m.Direct {

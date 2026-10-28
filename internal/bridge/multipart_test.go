@@ -644,3 +644,80 @@ func TestConcurrentChatsDoNotMix(t *testing.T) {
 		}
 	}
 }
+
+// ---------- 12: markdown renderer support ----------
+
+func TestOutboundStreamEmitsMarkdownRenderer(t *testing.T) {
+	b, mockL, mockA, _, initialID, user := setupTestBridge(t)
+	defer b.Close()
+	local := initialID.DestinationHashFor(reticulumLxmf.FullName())
+
+	// Multi-part response
+	setStream(mockA, streamText(strings.Repeat("Long markdown response line with **bold** text.\n", 300), 200))
+	sendUserMessage(mockL, local, user, "md-1", "Generate markdown")
+
+	waitFor(t, 2*time.Second, func() bool {
+		sent := mockL.getSent()
+		return len(sent) > 1 && infoOf(sent[len(sent)-1]).Status == lxmf.StatusCompleted
+	})
+
+	sent := mockL.getSent()
+	if len(sent) < 2 {
+		t.Fatalf("expected multi-part stream, got %d parts", len(sent))
+	}
+
+	for i, part := range sent {
+		renderer, ok := lxmf.ParseRenderer(part.Fields)
+		if !ok || renderer != lxmf.RendererMarkdown {
+			t.Errorf("part %d missing or wrong renderer: got (%d, %v), want (%d, true)", i, renderer, ok, lxmf.RendererMarkdown)
+		}
+	}
+}
+
+func TestHelpCommandMarkdownFormatting(t *testing.T) {
+	b, mockL, _, _, initialID, user := setupTestBridge(t)
+	defer b.Close()
+	local := initialID.DestinationHashFor(reticulumLxmf.FullName())
+
+	sendUserMessage(mockL, local, user, "cmd-help", "/help")
+
+	waitFor(t, 2*time.Second, func() bool {
+		return len(mockL.getSent()) >= 1
+	})
+
+	sent := mockL.getSent()
+	last := sent[len(sent)-1]
+	if last.Title != "Help" {
+		t.Fatalf("expected Help title, got %q", last.Title)
+	}
+	if !strings.Contains(last.Content, "**LXMF-ACP Agent Bridge commands:**") {
+		t.Errorf("expected bold title in markdown help, got: %q", last.Content)
+	}
+	if !strings.Contains(last.Content, "`/new`") || !strings.Contains(last.Content, "`/cancel`") {
+		t.Errorf("expected backticks in markdown help, got: %q", last.Content)
+	}
+}
+
+func TestInboundAssemblerPreservesRenderer(t *testing.T) {
+	a := NewAssembler(0)
+	c := newChain("L", "P")
+	p1 := c.msg("part1 ", nil, true, "")
+	p1.Renderer = lxmf.RendererMarkdown
+	p1.Fields = lxmf.WithRenderer(p1.Fields, lxmf.RendererMarkdown)
+
+	p2 := c.msg("part2", p1.MessageID, false, lxmf.StatusCompleted)
+
+	if out := a.Process(p1); out != nil {
+		t.Fatalf("premature output on first part")
+	}
+	out := a.Process(p2)
+	if out == nil {
+		t.Fatalf("expected assembled output on final part")
+	}
+	if out.Renderer != lxmf.RendererMarkdown {
+		t.Fatalf("assembled Renderer = %d, want %d", out.Renderer, lxmf.RendererMarkdown)
+	}
+	if !out.IsMarkdown() {
+		t.Fatalf("expected assembled message IsMarkdown() == true")
+	}
+}
