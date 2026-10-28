@@ -14,6 +14,7 @@ package lxmf
 // The message content is never altered: no numbering, prefixes or markers.
 
 import (
+	"encoding/hex"
 	"fmt"
 )
 
@@ -26,6 +27,14 @@ const (
 	RendererMicron   = 0x01
 	RendererMarkdown = 0x02
 	RendererBBCode   = 0x03
+
+	// FieldThread is LXMF FIELD_THREAD (0x08).
+	FieldThread = 0x08
+
+	// FieldReplyTo is LXMF FIELD_REPLY_TO (0x30).
+	FieldReplyTo = 0x30
+	// FieldReplyQuote is LXMF FIELD_REPLY_QUOTE (0x31).
+	FieldReplyQuote = 0x31
 
 	// FieldContinuation is LXMF FIELD_CONTINUATION.
 	FieldContinuation = 0x42
@@ -192,6 +201,52 @@ func WithRenderer(fields map[any]any, renderer int) map[any]any {
 		}
 	}
 	out[FieldRenderer] = renderer
+	return out
+}
+
+// ParseReplyFields extracts FIELD_REPLY_TO (0x30) and FIELD_REPLY_QUOTE (0x31) from decoded LXMF fields.
+// ReplyTo is returned as raw bytes (or decoded from hex string if encoded as string).
+// ReplyQuote is returned as string.
+func ParseReplyFields(fields map[any]any) ([]byte, string) {
+	var replyTo []byte
+	var replyQuote string
+
+	for k, v := range fields {
+		switch intKey(k) {
+		case FieldReplyTo:
+			if b, ok := asBytes(v); ok && len(b) > 0 {
+				if len(b) == 64 {
+					if decoded, err := hex.DecodeString(string(b)); err == nil {
+						replyTo = decoded
+						continue
+					}
+				}
+				replyTo = append([]byte(nil), b...)
+			}
+		case FieldReplyQuote:
+			if s, ok := asString(v); ok {
+				replyQuote = s
+			}
+		}
+	}
+	return replyTo, replyQuote
+}
+
+// WithReplyTo returns a copy of fields with FIELD_REPLY_TO and optional FIELD_REPLY_QUOTE set.
+func WithReplyTo(fields map[any]any, replyTo []byte, replyQuote string) map[any]any {
+	out := make(map[any]any, len(fields)+2)
+	for k, v := range fields {
+		ik := intKey(k)
+		if ik != FieldReplyTo && ik != FieldReplyQuote {
+			out[k] = v
+		}
+	}
+	if len(replyTo) > 0 {
+		out[FieldReplyTo] = append([]byte(nil), replyTo...)
+	}
+	if replyQuote != "" {
+		out[FieldReplyQuote] = replyQuote
+	}
 	return out
 }
 

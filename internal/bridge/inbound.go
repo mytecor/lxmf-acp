@@ -26,14 +26,16 @@ const (
 
 // assembly is one inbound multipart chain being collected.
 type assembly struct {
-	chatKey   string
-	localHash []byte
-	peerHash  []byte
-	title     string
-	text      strings.Builder
-	lastID    []byte
-	renderer  int
-	updated   time.Time
+	chatKey    string
+	localHash  []byte
+	peerHash   []byte
+	title      string
+	text       strings.Builder
+	lastID     []byte
+	renderer   int
+	replyTo    []byte
+	replyQuote string
+	updated    time.Time
 }
 
 // orphan is a continuation part whose predecessor has not been seen yet
@@ -88,6 +90,10 @@ func linkKey(chatKey string, hash []byte) string {
 // (intermediate part, duplicate, or a chain that ended unsuccessfully).
 // Messages without multipart signalling are returned unchanged.
 func (a *Assembler) Process(msg *lxmf.InboundMessage) *lxmf.InboundMessage {
+	if len(msg.ReplyTo) == 0 && msg.ReplyQuote == "" && msg.Fields != nil {
+		msg.ReplyTo, msg.ReplyQuote = lxmf.ParseReplyFields(msg.Fields)
+	}
+
 	info := lxmf.ParseMultipartFields(msg.Fields)
 	if !info.IsMultipart() {
 		return msg
@@ -124,14 +130,18 @@ func (a *Assembler) Process(msg *lxmf.InboundMessage) *lxmf.InboundMessage {
 			log.Printf("[Multipart] First part without message hash in chat %s dropped", chatKey)
 			return nil
 		}
+		replyTo := msg.ReplyTo
+		replyQuote := msg.ReplyQuote
 		asm := &assembly{
-			chatKey:   chatKey,
-			localHash: append([]byte(nil), msg.LocalHash...),
-			peerHash:  append([]byte(nil), msg.SenderHash...),
-			title:     msg.Title,
-			lastID:    append([]byte(nil), msg.MessageID...),
-			renderer:  msg.Renderer,
-			updated:   now,
+			chatKey:    chatKey,
+			localHash:  append([]byte(nil), msg.LocalHash...),
+			peerHash:   append([]byte(nil), msg.SenderHash...),
+			title:      msg.Title,
+			lastID:     append([]byte(nil), msg.MessageID...),
+			renderer:   msg.Renderer,
+			replyTo:    append([]byte(nil), replyTo...),
+			replyQuote: replyQuote,
+			updated:    now,
 		}
 		asm.text.WriteString(msg.Content)
 		a.byTail[linkKey(chatKey, asm.lastID)] = asm
@@ -174,6 +184,18 @@ func (a *Assembler) appendLocked(asm *assembly, msg *lxmf.InboundMessage, info l
 		if asm.renderer >= 0 {
 			fields = map[any]any{lxmf.FieldRenderer: asm.renderer}
 		}
+		if len(asm.replyTo) > 0 {
+			if fields == nil {
+				fields = make(map[any]any)
+			}
+			fields[lxmf.FieldReplyTo] = asm.replyTo
+		}
+		if asm.replyQuote != "" {
+			if fields == nil {
+				fields = make(map[any]any)
+			}
+			fields[lxmf.FieldReplyQuote] = asm.replyQuote
+		}
 		return &lxmf.InboundMessage{
 			LocalHash:  asm.localHash,
 			SenderHash: asm.peerHash,
@@ -183,6 +205,8 @@ func (a *Assembler) appendLocked(asm *assembly, msg *lxmf.InboundMessage, info l
 			Multipart:  true,
 			Renderer:   asm.renderer,
 			Fields:     fields,
+			ReplyTo:    asm.replyTo,
+			ReplyQuote: asm.replyQuote,
 		}
 	}
 

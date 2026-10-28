@@ -1,12 +1,15 @@
 package storage
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/thatSFguy/reticulum-go/rns"
 )
 
 type IdentityRecord struct {
@@ -25,9 +28,19 @@ type SessionEntry struct {
 	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
+type MessageEntry struct {
+	ID        string    `json:"id"`
+	ChatKey   string    `json:"chatKey"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
 type State struct {
-	Identities map[string]IdentityRecord `json:"identities"`
-	Sessions   map[string]SessionEntry   `json:"sessions"`
+	Identities      map[string]IdentityRecord     `json:"identities"`
+	Sessions        map[string]SessionEntry       `json:"sessions"`
+	Messages        map[string]MessageEntry       `json:"messages,omitempty"`
+	KnownIdentities map[string]*rns.KnownIdentity `json:"knownIdentities,omitempty"`
 }
 
 type Store struct {
@@ -47,8 +60,10 @@ func NewStore(path string) (*Store, error) {
 	s := &Store{
 		path: path,
 		data: State{
-			Identities: make(map[string]IdentityRecord),
-			Sessions:   make(map[string]SessionEntry),
+			Identities:      make(map[string]IdentityRecord),
+			Sessions:        make(map[string]SessionEntry),
+			Messages:        make(map[string]MessageEntry),
+			KnownIdentities: make(map[string]*rns.KnownIdentity),
 		},
 	}
 
@@ -86,6 +101,12 @@ func (s *Store) load() error {
 	}
 	if loaded.Identities == nil {
 		loaded.Identities = make(map[string]IdentityRecord)
+	}
+	if loaded.Messages == nil {
+		loaded.Messages = make(map[string]MessageEntry)
+	}
+	if loaded.KnownIdentities == nil {
+		loaded.KnownIdentities = make(map[string]*rns.KnownIdentity)
 	}
 	s.data = loaded
 	return nil
@@ -219,4 +240,102 @@ func (s *Store) CountIdentitiesForOwner(ownerHex string) int {
 		}
 	}
 	return count
+}
+
+const maxStoredMessages = 200
+
+func (s *Store) SaveMessage(entry MessageEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if entry.ID == "" {
+		return nil
+	}
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now()
+	}
+
+	if s.data.Messages == nil {
+		s.data.Messages = make(map[string]MessageEntry)
+	}
+
+	if len(s.data.Messages) >= maxStoredMessages {
+		var oldestKey string
+		var oldestTime time.Time
+		first := true
+		for k, m := range s.data.Messages {
+			if first || m.Timestamp.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = m.Timestamp
+				first = false
+			}
+		}
+		if oldestKey != "" {
+			delete(s.data.Messages, oldestKey)
+		}
+	}
+
+	s.data.Messages[entry.ID] = entry
+	return s.saveLocked()
+}
+
+func (s *Store) GetMessage(idHex string) (MessageEntry, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.data.Messages == nil {
+		return MessageEntry{}, false
+	}
+	entry, ok := s.data.Messages[idHex]
+	return entry, ok
+}
+
+func (s *Store) GetRecentMessages() []MessageEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(s.data.Messages) == 0 {
+		return nil
+	}
+	msgs := make([]MessageEntry, 0, len(s.data.Messages))
+	for _, m := range s.data.Messages {
+		msgs = append(msgs, m)
+	}
+	return msgs
+}
+
+func (s *Store) SaveKnownIdentities(known []*rns.KnownIdentity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.data.KnownIdentities == nil {
+		s.data.KnownIdentities = make(map[string]*rns.KnownIdentity)
+	}
+	changed := false
+	for _, k := range known {
+		if k == nil || len(k.DestHash) == 0 {
+			continue
+		}
+		key := hex.EncodeToString(k.DestHash)
+		existing, ok := s.data.KnownIdentities[key]
+		if !ok || k.LastSeen.After(existing.LastSeen) {
+			s.data.KnownIdentities[key] = k
+			changed = true
+		}
+	}
+	if changed {
+		return s.saveLocked()
+	}
+	return nil
+}
+
+func (s *Store) GetKnownIdentities() []*rns.KnownIdentity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]*rns.KnownIdentity, 0, len(s.data.KnownIdentities))
+	for _, k := range s.data.KnownIdentities {
+		out = append(out, k)
+	}
+	return out
 }

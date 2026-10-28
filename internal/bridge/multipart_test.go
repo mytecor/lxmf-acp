@@ -721,3 +721,34 @@ func TestInboundAssemblerPreservesRenderer(t *testing.T) {
 		t.Fatalf("expected assembled message IsMarkdown() == true")
 	}
 }
+
+func TestInboundAssemblerPreservesReplyFields(t *testing.T) {
+	a := NewAssembler(0)
+	c := newChain("L", "P")
+	replyID := []byte{0x12, 0x34, 0x56, 0x78}
+	quote := "quoted previous text"
+
+	p1 := c.msg("part1 ", nil, true, "")
+	p1.ReplyTo = replyID
+	p1.ReplyQuote = quote
+	p1.Fields = lxmf.WithReplyTo(p1.Fields, replyID, quote)
+
+	p2 := c.msg("part2", p1.MessageID, false, lxmf.StatusCompleted)
+
+	if out := a.Process(p1); out != nil {
+		t.Fatalf("premature output on first part")
+	}
+	out := a.Process(p2)
+	if out == nil {
+		t.Fatalf("expected assembled output on final part")
+	}
+	if !bytes.Equal(out.ReplyTo, replyID) {
+		t.Fatalf("assembled ReplyTo = %x, want %x", out.ReplyTo, replyID)
+	}
+	if out.ReplyQuote != quote {
+		t.Fatalf("assembled ReplyQuote = %q, want %q", out.ReplyQuote, quote)
+	}
+	if !out.IsReply() {
+		t.Fatalf("expected assembled message IsReply() == true")
+	}
+}

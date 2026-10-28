@@ -27,11 +27,21 @@ type InboundMessage struct {
 	// Renderer indicates the content renderer hint (e.g. RendererMarkdown).
 	// Set to -1 if no renderer field was present.
 	Renderer int
+	// ReplyTo is the MessageID (hash) of the message this message is replying to,
+	// if FIELD_REPLY_TO (0x30) was present.
+	ReplyTo []byte
+	// ReplyQuote is the quoted text snippet if FIELD_REPLY_QUOTE (0x31) was present.
+	ReplyQuote string
 }
 
 // IsMarkdown reports whether the message explicitly specifies Markdown rendering.
 func (m *InboundMessage) IsMarkdown() bool {
 	return m.Renderer == RendererMarkdown
+}
+
+// IsReply reports whether the message references another message via ReplyTo or ReplyQuote.
+func (m *InboundMessage) IsReply() bool {
+	return len(m.ReplyTo) > 0 || m.ReplyQuote != ""
 }
 
 // OutboundMessage describes a single outbound LXMF message.
@@ -66,8 +76,9 @@ type Client struct {
 	deliveries map[string]*lxmf.Delivery
 	identities map[string]*rns.Identity
 
-	OnMessage MessageHandler
-	OnError   func(error)
+	OnMessage  MessageHandler
+	OnError    func(error)
+	OnAnnounce func(*rns.Announce)
 }
 
 func NewClient(rnsAddr string, displayName string, identity *rns.Identity) (*Client, error) {
@@ -95,6 +106,12 @@ func (c *Client) SetMessageHandler(h MessageHandler) {
 	c.OnMessage = h
 }
 
+func (c *Client) SetAnnounceHandler(h func(*rns.Announce)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.OnAnnounce = h
+}
+
 func (c *Client) Start(ctx context.Context) error {
 	log.Printf("[LXMF] Connecting to Reticulum instance at %s...", c.rnsAddr)
 
@@ -106,6 +123,17 @@ func (c *Client) Start(ctx context.Context) error {
 
 	c.transport = rns.NewTransport(nil)
 	c.transport.AddInterface(tcpIface)
+
+	c.transport.RegisterAnnounceHandler(&clientAnnounceHandler{
+		onAnnounce: func(a *rns.Announce) {
+			c.mu.RLock()
+			handler := c.OnAnnounce
+			c.mu.RUnlock()
+			if handler != nil {
+				handler(a)
+			}
+		},
+	})
 
 	c.mu.Lock()
 	for _, id := range c.identities {
@@ -168,6 +196,7 @@ func (c *Client) registerDeliveryLocked(id *rns.Identity) error {
 				locHash = destHash
 			}
 			renderer, _ := ParseRenderer(m.Fields)
+			replyTo, replyQuote := ParseReplyFields(m.Fields)
 			msg := &InboundMessage{
 				LocalHash:  append([]byte(nil), locHash...),
 				SenderHash: append([]byte(nil), m.SourceHash...),
@@ -176,6 +205,8 @@ func (c *Client) registerDeliveryLocked(id *rns.Identity) error {
 				Content:    string(m.Content),
 				Fields:     m.Fields,
 				Renderer:   renderer,
+				ReplyTo:    replyTo,
+				ReplyQuote: replyQuote,
 			}
 			handler(msg)
 		}
@@ -413,4 +444,59 @@ func (c *Client) Close() error {
 		return c.tcpIface.Close()
 	}
 	return nil
+}
+
+type clientAnnounceHandler struct {
+	onAnnounce func(*rns.Announce)
+}
+
+func (h *clientAnnounceHandler) AspectMatch(nameHash []byte) bool {
+	return true
+}
+
+func (h *clientAnnounceHandler) OnAnnounce(a *rns.Announce) {
+	if h.onAnnounce != nil {
+		h.onAnnounce(a)
+	}
+}
+
+func (c *Client) RestoreKnownIdentities(identities []*rns.KnownIdentity) {
+	c.mu.RLock()
+	t := c.transport
+	c.mu.RUnlock()
+	if t == nil {
+		return
+	}
+	for _, k := range identities {
+		t.Restore(k)
+	}
+}
+
+func (c *Client) KnownSnapshot() []*rns.KnownIdentity {
+	c.mu.RLock()
+	t := c.transport
+	c.mu.RUnlock()
+	if t == nil {
+		return nil
+	}
+	return t.KnownSnapshot()
+}
+
+func (c *Client) PinDestinations(destHashes [][]byte) {
+	c.mu.RLock()
+	t := c.transport
+	c.mu.RUnlock()
+	if t != nil {
+		t.PinDestinations(destHashes)
+	}
+}
+
+func (c *Client) RequestPath(destHash []byte) error {
+	c.mu.RLock()
+	t := c.transport
+	c.mu.RUnlock()
+	if t == nil {
+		return errors.New("transport not started")
+	}
+	return t.RequestPath(destHash)
 }

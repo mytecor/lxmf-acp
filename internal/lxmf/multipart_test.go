@@ -216,3 +216,56 @@ func TestRendererRoundTrip(t *testing.T) {
 		t.Fatalf("ParseRenderer after roundTrip = (%d, %v), want (%d, true)", r, ok, RendererMarkdown)
 	}
 }
+
+func TestReplyFields(t *testing.T) {
+	replyID := bytes.Repeat([]byte{0x42}, 32)
+	quote := "Original message snippet"
+
+	// 1. WithReplyTo and ParseReplyFields
+	fields := WithReplyTo(nil, replyID, quote)
+	gotID, gotQuote := ParseReplyFields(fields)
+	if !bytes.Equal(gotID, replyID) {
+		t.Fatalf("gotID = %x, want %x", gotID, replyID)
+	}
+	if gotQuote != quote {
+		t.Fatalf("gotQuote = %q, want %q", gotQuote, quote)
+	}
+
+	// 2. Hex string decoding in ParseReplyFields
+	hexID := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	rawFields := map[any]any{
+		FieldReplyTo:    hexID,
+		FieldReplyQuote: []byte("byte quote"),
+	}
+	parsedID, parsedQuote := ParseReplyFields(rawFields)
+	if len(parsedID) != 32 || parsedID[0] != 0x01 {
+		t.Fatalf("expected 32-byte decoded hex, got %x", parsedID)
+	}
+	if parsedQuote != "byte quote" {
+		t.Fatalf("expected string quote, got %q", parsedQuote)
+	}
+
+	// 3. Real wire round-trip
+	msg, _ := roundTrip(t, "This is a reply", fields)
+	rtID, rtQuote := ParseReplyFields(msg.Fields)
+	if !bytes.Equal(rtID, replyID) {
+		t.Fatalf("roundTrip reply ID = %x, want %x", rtID, replyID)
+	}
+	if rtQuote != quote {
+		t.Fatalf("roundTrip quote = %q, want %q", rtQuote, quote)
+	}
+
+	// 4. InboundMessage helper
+	msgWithReply := &InboundMessage{ReplyTo: replyID}
+	if !msgWithReply.IsReply() {
+		t.Fatalf("expected IsReply() == true")
+	}
+	msgWithQuote := &InboundMessage{ReplyQuote: quote}
+	if !msgWithQuote.IsReply() {
+		t.Fatalf("expected IsReply() == true with quote")
+	}
+	msgNormal := &InboundMessage{}
+	if msgNormal.IsReply() {
+		t.Fatalf("expected IsReply() == false for normal message")
+	}
+}

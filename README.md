@@ -27,6 +27,7 @@ Sideband / Columba
 - **Persistent State**: Persists private keys of generated identities, ownership records, and session mappings with atomic writes.
 - **Multipart LXMF Streaming**: Transparently handles arbitrary-length responses via standard `FIELD_CONTINUATION (0x42)` and namespaced `FIELD_CUSTOM_META (0xFD)`. Segments text into parts under 10 000 UTF-16 units without breaking unicode/whitespace. Delivers sequentially via `LXMF DIRECT` during generation and reassembles incoming multipart chains from peer instances before invoking ACP. Compatible with Sideband, Columba, and Ratspeak.
 - **Markdown Rendering**: Sets LXMF `FIELD_RENDERER (0x0F)` to `RENDERER_MARKDOWN (0x02)` across all agent responses, notifications, and commands. Compatible clients (such as Columba, Sideband, and MeshChat) render formatted markdown, lists, code blocks, and emphasis natively.
+- **Native Reply & Threading Support**: Supports standard LXMF reply fields (`FIELD_REPLY_TO 0x30` and `FIELD_REPLY_QUOTE 0x31`). When you reply to any message in client interfaces like Sideband, Columba, or MeshChat, the bridge resolves the parent message from its history cache or quote snippet, passes the quoted context clearly to the ACP agent, and threads the agent's response back to your reply.
 
 ---
 

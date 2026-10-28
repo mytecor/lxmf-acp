@@ -1,10 +1,12 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +29,11 @@ type LXMFClient interface {
 	Hash() []byte
 	HexHash() string
 	SetMessageHandler(h lxmf.MessageHandler)
+	RestoreKnownIdentities(identities []*rns.KnownIdentity)
+	KnownSnapshot() []*rns.KnownIdentity
+	PinDestinations(destHashes [][]byte)
+	RequestPath(destHash []byte) error
+	SetAnnounceHandler(h func(*rns.Announce))
 }
 
 type ACPClient interface {
@@ -49,6 +56,7 @@ type Bridge struct {
 	sessions   *SessionManager
 	queue      *QueueManager
 	assembler  *Assembler
+	history    *MessageHistory
 
 	// Outbound part limits (zero selects the defaults).
 	maxPartUnits int
@@ -76,6 +84,7 @@ func NewBridge(cfg *config.Config, lxmfClient LXMFClient, acpClient ACPClient, s
 	b.sessions = NewSessionManager(store, acpClient)
 	b.queue = NewQueueManager(b)
 	b.assembler = NewAssembler(DefaultAssemblyTimeout)
+	b.history = NewMessageHistory(1000)
 
 	return b
 }
@@ -86,7 +95,12 @@ func (b *Bridge) Start(ctx context.Context) error {
 		log.Printf("[Bridge] Warning: ACP agent connection failed initially (%v). Will retry on first message.", err)
 	}
 
-	// 2. Restore and register all stored identities
+	// 2. Seed in-memory message history from persistent store
+	for _, rec := range b.store.GetRecentMessages() {
+		b.history.RecordHex(rec.ID, rec.ChatKey, rec.Role, rec.Content, rec.Timestamp)
+	}
+
+	// 3. Restore and register all stored identities
 	allRecords := b.store.GetAllIdentities()
 	for _, rec := range allRecords {
 		if rec.PrivateKey == "" {
@@ -126,12 +140,47 @@ func (b *Bridge) Start(ctx context.Context) error {
 		b.handleInbound(msg)
 	})
 
-	// 5. Start LXMF client
+	// 5. Register announce handler to persist peer identities
+	b.lxmfClient.SetAnnounceHandler(func(a *rns.Announce) {
+		snapshot := b.lxmfClient.KnownSnapshot()
+		if len(snapshot) > 0 {
+			_ = b.store.SaveKnownIdentities(snapshot)
+		}
+	})
+
+	// 6. Start LXMF client
 	if err := b.lxmfClient.Start(ctx); err != nil {
 		return fmt.Errorf("start lxmf client: %w", err)
 	}
 
-	// 6. Periodically discard incomplete inbound multipart chains
+	// 7. Restore cached peer identities so restarting never drops incoming messages
+	storedKnown := b.store.GetKnownIdentities()
+	if len(storedKnown) > 0 {
+		b.lxmfClient.RestoreKnownIdentities(storedKnown)
+		log.Printf("[Bridge] Restored %d known peer identities to Reticulum cache", len(storedKnown))
+	}
+
+	// 8. Pin local destinations and chat owner destinations to protect against cache eviction
+	var pinned [][]byte
+	if initHash := b.lxmfClient.Hash(); len(initHash) > 0 {
+		pinned = append(pinned, initHash)
+	}
+	for _, rec := range allRecords {
+		if h, err := hex.DecodeString(rec.Hash); err == nil {
+			pinned = append(pinned, h)
+		}
+		if rec.Owner != "" {
+			if o, err := hex.DecodeString(rec.Owner); err == nil {
+				pinned = append(pinned, o)
+				_ = b.lxmfClient.RequestPath(o)
+			}
+		}
+	}
+	if len(pinned) > 0 {
+		b.lxmfClient.PinDestinations(pinned)
+	}
+
+	// 9. Periodically discard incomplete inbound multipart chains
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -167,18 +216,86 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 		}
 	}
 
+	chatKey := localHex + ":" + senderHex
+
+	// Record raw part into memory history cache
+	if len(msg.MessageID) > 0 && msg.Content != "" && b.history != nil {
+		b.history.Record(msg.MessageID, chatKey, "user", msg.Content)
+	}
+
 	// Reassemble multipart chains; only complete prompts reach the queue.
 	ready := b.assembler.Process(msg)
 	if ready == nil {
 		return
 	}
 
+	// Record complete assembled message in history and persistent store
+	if len(ready.MessageID) > 0 && ready.Content != "" {
+		if b.history != nil {
+			b.history.Record(ready.MessageID, chatKey, "user", ready.Content)
+		}
+		if b.store != nil {
+			_ = b.store.SaveMessage(storage.MessageEntry{
+				ID:        hex.EncodeToString(ready.MessageID),
+				ChatKey:   chatKey,
+				Role:      "user",
+				Content:   ready.Content,
+				Timestamp: time.Now(),
+			})
+		}
+	}
+
 	b.queue.Enqueue(ready)
 }
 
 // newReplyStream starts a streamed, possibly multipart, reply in a chat.
-func (b *Bridge) newReplyStream(localHash, peerHash []byte, title string) *replyStream {
-	return newReplyStream(b.lxmfClient, localHash, peerHash, title, NewSegmenter(b.maxPartUnits, b.maxPartBytes))
+func (b *Bridge) newReplyStream(localHash, peerHash []byte, title string, replyTo []byte) *replyStream {
+	return newReplyStream(b.lxmfClient, localHash, peerHash, title, replyTo, b.history, b.store, NewSegmenter(b.maxPartUnits, b.maxPartBytes))
+}
+
+// formatPromptWithReply enriches prompt text with quoted context if msg is a reply to a previous message.
+func (b *Bridge) formatPromptWithReply(msg *lxmf.InboundMessage, baseText string) string {
+	if len(msg.ReplyTo) == 0 && msg.ReplyQuote == "" {
+		return baseText
+	}
+
+	replyIDHex := hex.EncodeToString(msg.ReplyTo)
+	var quoteText string
+	var role string
+
+	if len(msg.ReplyTo) > 0 && b.history != nil {
+		if entry, ok := b.history.Get(msg.ReplyTo); ok {
+			quoteText = entry.Content
+			role = entry.Role
+		}
+	}
+
+	if quoteText == "" && msg.ReplyQuote != "" {
+		quoteText = msg.ReplyQuote
+	}
+
+	if quoteText == "" && replyIDHex != "" {
+		return fmt.Sprintf("[In reply to message <%s>]\n\n%s", replyIDHex, baseText)
+	}
+
+	if quoteText != "" {
+		quoted := quoteText
+		if len(quoted) > 500 {
+			quoted = quoted[:497] + "..."
+		}
+		lines := strings.Split(quoted, "\n")
+		for i, l := range lines {
+			lines[i] = "> " + l
+		}
+		blockQuote := strings.Join(lines, "\n")
+
+		if role != "" {
+			return fmt.Sprintf("[In reply to %s:\n%s]\n\n%s", role, blockQuote, baseText)
+		}
+		return fmt.Sprintf("[In reply to:\n%s]\n\n%s", blockQuote, baseText)
+	}
+
+	return baseText
 }
 
 func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
@@ -269,7 +386,13 @@ func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
 
 	log.Printf("[Bridge] Successfully created new chat %s for user %s (requested from chat %s)", newDestHex, senderHex, localHex)
 
-	// 7. Send welcome message from the new identity using opportunistic delivery
+	// 7. Inform originating chat of the new chat destination so the user sees immediate feedback
+	if !bytes.Equal(msg.LocalHash, newDestHash) {
+		confirmMsg := fmt.Sprintf("Started a new conversation.\n\nChat destination: `<%s>`", newDestHex)
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", confirmMsg)
+	}
+
+	// 8. Send welcome message from the new identity using opportunistic delivery
 	welcomeContent := fmt.Sprintf("Started a new conversation with **%s**.\n\nSend a message to begin.", b.cfg.DisplayName)
 	err = b.lxmfClient.SendFrom(newDestHash, msg.SenderHash, "", welcomeContent)
 	if err != nil {
@@ -282,6 +405,9 @@ func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
 }
 
 func (b *Bridge) Close() error {
+	if snapshot := b.lxmfClient.KnownSnapshot(); len(snapshot) > 0 {
+		_ = b.store.SaveKnownIdentities(snapshot)
+	}
 	_ = b.lxmfClient.Close()
 	_ = b.acpClient.Close()
 	return nil

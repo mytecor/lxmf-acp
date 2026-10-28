@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -160,6 +161,12 @@ func (m *mockLXMF) SetMessageHandler(h lxmf.MessageHandler) {
 	defer m.mu.Unlock()
 	m.handler = h
 }
+
+func (m *mockLXMF) RestoreKnownIdentities(identities []*rns.KnownIdentity) {}
+func (m *mockLXMF) KnownSnapshot() []*rns.KnownIdentity                   { return nil }
+func (m *mockLXMF) PinDestinations(destHashes [][]byte)                   {}
+func (m *mockLXMF) RequestPath(destHash []byte) error                     { return nil }
+func (m *mockLXMF) SetAnnounceHandler(h func(*rns.Announce))              {}
 
 func (m *mockLXMF) getSent() []sentMsg {
 	m.mu.Lock()
@@ -916,4 +923,115 @@ func findSubstr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestReplyHandling(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := storage.NewStore(filepath.Join(tmpDir, "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	initID, _ := rns.NewIdentity()
+	initialHash := initID.DestinationHashFor(reticulumLxmf.FullName())
+	mockL := newMockLXMF(initID)
+	mockA := newMockACP(false)
+
+	userID, _ := rns.NewIdentity()
+	userHash := userID.DestinationHashFor(reticulumLxmf.FullName())
+	userHex := hex.EncodeToString(userHash)
+
+	cfg := &config.Config{
+		DisplayName: "TestAgent",
+		Allowlist:   []string{userHex},
+	}
+
+	b := NewBridge(cfg, mockL, mockA, store)
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Bridge.Start failed: %v", err)
+	}
+	defer b.Close()
+
+	// 1. Initial normal turn
+	m1ID := []byte("user-msg-1")
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: userHash,
+		MessageID:  m1ID,
+		Title:      "Question",
+		Content:    "Hello agent",
+	})
+	time.Sleep(150 * time.Millisecond)
+
+	sent := mockL.getSent()
+	if len(sent) == 0 {
+		t.Fatalf("expected agent response, got none")
+	}
+	firstAgentReply := sent[len(sent)-1]
+	// Normal message reply should NOT have FieldReplyTo
+	if _, hasReplyTo := firstAgentReply.Fields[lxmf.FieldReplyTo]; hasReplyTo {
+		t.Errorf("normal response should not carry FieldReplyTo, got %v", firstAgentReply.Fields[lxmf.FieldReplyTo])
+	}
+
+	// 2. User replies to the assistant's previous message
+	m2ID := []byte("user-msg-2")
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: userHash,
+		MessageID:  m2ID,
+		Title:      "Reply",
+		Content:    "Option A please",
+		Fields: map[any]any{
+			lxmf.FieldReplyTo: firstAgentReply.ID,
+		},
+	})
+	time.Sleep(150 * time.Millisecond)
+
+	prompts := mockA.getPrompts()
+	if len(prompts) < 2 {
+		t.Fatalf("expected at least 2 prompts, got %d", len(prompts))
+	}
+	p2 := prompts[len(prompts)-1]
+	if !containsStr(p2, "[In reply to assistant:") {
+		t.Errorf("expected prompt to contain '[In reply to assistant:', got %q", p2)
+	}
+	if !containsStr(p2, "Hello agent") {
+		t.Errorf("expected quoted content in prompt, got %q", p2)
+	}
+	if !containsStr(p2, "Option A please") {
+		t.Errorf("expected user reply text in prompt, got %q", p2)
+	}
+
+	// The agent's response to a reply message SHOULD carry FieldReplyTo pointing to m2ID
+	sent = mockL.getSent()
+	secondAgentReply := sent[len(sent)-1]
+	repField, ok := secondAgentReply.Fields[lxmf.FieldReplyTo].([]byte)
+	if !ok || !bytes.Equal(repField, m2ID) {
+		t.Errorf("expected response to carry FieldReplyTo=%x, got %x (ok=%v)", m2ID, repField, ok)
+	}
+
+	// 3. User replies with FieldReplyQuote when target message is not in cache
+	unknownID := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	m3ID := []byte("user-msg-3")
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: userHash,
+		MessageID:  m3ID,
+		Title:      "Quote Reply",
+		Content:    "I agree with that quote",
+		Fields: map[any]any{
+			lxmf.FieldReplyTo:    unknownID,
+			lxmf.FieldReplyQuote: "Some ancient quote",
+		},
+	})
+	time.Sleep(150 * time.Millisecond)
+
+	prompts = mockA.getPrompts()
+	p3 := prompts[len(prompts)-1]
+	if !containsStr(p3, "[In reply to:\n> Some ancient quote]") {
+		t.Errorf("expected prompt to contain '[In reply to:\\n> Some ancient quote]', got %q", p3)
+	}
+	if !containsStr(p3, "I agree with that quote") {
+		t.Errorf("expected user text in prompt, got %q", p3)
+	}
 }

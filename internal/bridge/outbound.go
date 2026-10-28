@@ -6,8 +6,10 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mytecor/lxmf-acp/internal/lxmf"
+	"github.com/mytecor/lxmf-acp/internal/storage"
 )
 
 const emptyReplyText = "(Empty response from agent)"
@@ -33,7 +35,11 @@ type replyStream struct {
 	client    LXMFClient
 	localHash []byte
 	peerHash  []byte
+	chatKey   string
 	title     string
+	replyTo   []byte
+	history   *MessageHistory
+	store     *storage.Store
 	seg       *Segmenter
 
 	mu       sync.Mutex
@@ -46,12 +52,17 @@ type replyStream struct {
 	done chan struct{}
 }
 
-func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string, seg *Segmenter) *replyStream {
+func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string, replyTo []byte, history *MessageHistory, store *storage.Store, seg *Segmenter) *replyStream {
+	chatKey := hex.EncodeToString(localHash) + ":" + hex.EncodeToString(peerHash)
 	s := &replyStream{
 		client:    client,
 		localHash: append([]byte(nil), localHash...),
 		peerHash:  append([]byte(nil), peerHash...),
+		chatKey:   chatKey,
 		title:     title,
+		replyTo:   append([]byte(nil), replyTo...),
+		history:   history,
+		store:     store,
 		seg:       seg,
 		done:      make(chan struct{}),
 	}
@@ -170,6 +181,9 @@ func (s *replyStream) run() {
 			status = p.status
 		}
 		baseFields := map[any]any{lxmf.FieldRenderer: lxmf.RendererMarkdown}
+		if first && len(s.replyTo) > 0 {
+			baseFields[lxmf.FieldReplyTo] = s.replyTo
+		}
 		fields := lxmf.BuildMultipartFields(baseFields, prev, first && !p.final, status)
 
 		id, err := s.client.SendMessage(s.localHash, s.peerHash, lxmf.OutboundMessage{
@@ -186,6 +200,20 @@ func (s *replyStream) run() {
 				hex.EncodeToString(s.localHash), hex.EncodeToString(s.peerHash), err)
 			s.fail(err)
 			continue
+		}
+		if len(id) > 0 {
+			if s.history != nil {
+				s.history.Record(id, s.chatKey, "assistant", p.content)
+			}
+			if s.store != nil {
+				_ = s.store.SaveMessage(storage.MessageEntry{
+					ID:        hex.EncodeToString(id),
+					ChatKey:   s.chatKey,
+					Role:      "assistant",
+					Content:   p.content,
+					Timestamp: time.Now(),
+				})
+			}
 		}
 		prev = id
 		first = false

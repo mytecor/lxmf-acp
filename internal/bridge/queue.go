@@ -131,9 +131,16 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 		promptText = msg.Content
 	}
 
+	// Enrich prompt with reply quote context if message is a reply
+	promptText = q.bridge.formatPromptWithReply(msg, promptText)
+
 	// The reply is streamed: parts are delivered while the agent is still
 	// generating. Waiting for the stream keeps replies of one chat ordered.
-	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "")
+	var replyToID []byte
+	if msg.IsReply() {
+		replyToID = msg.MessageID
+	}
+	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "", replyToID)
 	stopReason, err := q.bridge.acpClient.PromptStream(promptCtx, sessionID, promptText, stream.Write)
 	switch {
 	case err == nil && stopReason == stopReasonCancelled:

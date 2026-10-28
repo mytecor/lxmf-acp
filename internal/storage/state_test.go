@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/thatSFguy/reticulum-go/rns"
 )
 
 func TestStoreOperations(t *testing.T) {
@@ -108,5 +110,88 @@ func TestStoreIdentities(t *testing.T) {
 	all := store2.GetAllIdentities()
 	if len(all) != 2 {
 		t.Errorf("GetAllIdentities len = %d; want 2", len(all))
+	}
+}
+
+func TestStoreMessages(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateFile := filepath.Join(tmpDir, "state.json")
+
+	store, err := NewStore(stateFile)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	m1 := MessageEntry{
+		ID:        "0123456789abcdef",
+		ChatKey:   "local:peer",
+		Role:      "assistant",
+		Content:   "Hello from assistant",
+		Timestamp: time.Now(),
+	}
+
+	if err := store.SaveMessage(m1); err != nil {
+		t.Fatalf("SaveMessage failed: %v", err)
+	}
+
+	got, ok := store.GetMessage(m1.ID)
+	if !ok || got.Content != m1.Content || got.Role != "assistant" {
+		t.Fatalf("GetMessage = %+v, %v; want %+v, true", got, ok, m1)
+	}
+
+	// Reload from disk
+	store2, err := NewStore(stateFile)
+	if err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+
+	got2, ok2 := store2.GetMessage(m1.ID)
+	if !ok2 || got2.Content != m1.Content {
+		t.Fatalf("Reload GetMessage = %+v, %v", got2, ok2)
+	}
+
+	recent := store2.GetRecentMessages()
+	if len(recent) != 1 || recent[0].ID != m1.ID {
+		t.Fatalf("GetRecentMessages = %+v; want 1 message", recent)
+	}
+}
+
+func TestStoreKnownIdentities(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateFile := filepath.Join(tmpDir, "state.json")
+
+	store, err := NewStore(stateFile)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	destHash := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	pubKey := make([]byte, 64)
+	pubKey[0] = 0x42
+	k := &rns.KnownIdentity{
+		DestHash:  destHash,
+		PublicKey: pubKey,
+		LastSeen:  time.Now(),
+	}
+
+	if err := store.SaveKnownIdentities([]*rns.KnownIdentity{k}); err != nil {
+		t.Fatalf("SaveKnownIdentities failed: %v", err)
+	}
+
+	// Reload from disk
+	store2, err := NewStore(stateFile)
+	if err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+
+	known := store2.GetKnownIdentities()
+	if len(known) != 1 {
+		t.Fatalf("GetKnownIdentities len = %d; want 1", len(known))
+	}
+	if string(known[0].DestHash) != string(destHash) {
+		t.Fatalf("DestHash mismatch: got %x, want %x", known[0].DestHash, destHash)
+	}
+	if string(known[0].PublicKey) != string(pubKey) {
+		t.Fatalf("PublicKey mismatch: got %x, want %x", known[0].PublicKey, pubKey)
 	}
 }
