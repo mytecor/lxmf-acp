@@ -133,7 +133,7 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 
 	// The reply is streamed: parts are delivered while the agent is still
 	// generating. Waiting for the stream keeps replies of one chat ordered.
-	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "Reply")
+	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "")
 	stopReason, err := q.bridge.acpClient.PromptStream(promptCtx, sessionID, promptText, stream.Write)
 	switch {
 	case err == nil && stopReason == stopReasonCancelled:
