@@ -123,7 +123,10 @@ func (b *Bridge) Start(ctx context.Context) error {
 		log.Printf("[Bridge] Restored dynamic identity: %s (owner: %s)", rec.Hash, rec.Owner)
 	}
 
-	// 3. Sync CLI allowlist into store allowlist if provided
+	// 3. Sync CLI admin and allowlist into store if provided
+	if b.cfg.Admin != "" {
+		_ = b.store.SetAdmin(b.cfg.Admin)
+	}
 	if len(b.cfg.Allowlist) > 0 {
 		for _, a := range b.cfg.Allowlist {
 			_, _ = b.store.AddToAllowlist(a)
@@ -232,9 +235,19 @@ func (b *Bridge) isAdmin(senderHex string) bool {
 	if admin == "" {
 		initHex := b.lxmfClient.HexHash()
 		if initHex != "" {
-			if rec, found := b.store.GetIdentity(initHex); found && rec.Owner != "" {
-				admin = rec.Owner
-				_ = b.store.SetAdmin(admin)
+			if rec, found := b.store.GetIdentity(initHex); found {
+				if rec.Owner != "" {
+					admin = rec.Owner
+					_ = b.store.SetAdmin(admin)
+				} else {
+					// Root identity is unassigned and no admin is configured:
+					// Claim root identity and admin role for this sender.
+					admin = senderHex
+					_ = b.store.SetAdmin(admin)
+					rec.Owner = admin
+					_ = b.store.SaveIdentity(rec)
+					log.Printf("[Bridge] Unassigned root chat %s and admin role claimed by: %s", initHex, admin)
+				}
 			}
 		}
 	}
@@ -273,6 +286,19 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 				_, _ = b.createDedicatedChatFor(msg.SenderHash, senderHex, msg.LocalHash)
 			}
 			return
+		}
+	}
+
+	// If admin is still unassigned and root identity has no owner, claim root and admin
+	if b.store.GetAdmin() == "" {
+		initHex := b.lxmfClient.HexHash()
+		if initHex != "" {
+			if rootRec, foundRoot := b.store.GetIdentity(initHex); foundRoot && rootRec.Owner == "" {
+				rootRec.Owner = senderHex
+				_ = b.store.SaveIdentity(rootRec)
+				_ = b.store.SetAdmin(senderHex)
+				log.Printf("[Bridge] Root chat %s and admin role claimed by active user: %s", initHex, senderHex)
+			}
 		}
 	}
 

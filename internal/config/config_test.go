@@ -24,3 +24,12 @@ func TestIsAllowed(t *testing.T) {
 		t.Errorf("expected empty allowlist to allow all")
 	}
 }
+
+func TestAdminConfig(t *testing.T) {
+	cfg := &Config{
+		Admin: "626e3c20bc183c6e9257a3b908c4181e",
+	}
+	if cfg.Admin != "626e3c20bc183c6e9257a3b908c4181e" {
+		t.Errorf("unexpected admin: %s", cfg.Admin)
+	}
+}

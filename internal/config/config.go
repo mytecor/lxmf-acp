@@ -13,6 +13,7 @@ type Config struct {
 	ACPEndpoint          string
 	RNSAddr              string
 	DisplayName          string
+	Admin                string
 	Allowlist            []string
 	MaxIdentitiesPerUser int
 	NewChatCooldownSec   int
@@ -27,6 +28,7 @@ func Parse() *Config {
 	flag.StringVar(&cfg.ACPEndpoint, "acp", "ws://localhost:8080/acp", "ACP agent WebSocket endpoint URL")
 	flag.StringVar(&cfg.RNSAddr, "rns", "127.0.0.1:37428", "Reticulum shared instance TCP address")
 	flag.StringVar(&cfg.DisplayName, "name", "LXMF Agent", "Display name announced in LXMF")
+	flag.StringVar(&cfg.Admin, "admin", "", "Administrator destination hash (has permissions for /allow, /revoke, /whitelist)")
 	flag.IntVar(&cfg.MaxIdentitiesPerUser, "max-user-identities", 20, "Maximum number of chats/identities allowed per user (0 for unlimited)")
 	flag.IntVar(&cfg.NewChatCooldownSec, "new-chat-cooldown", 5, "Minimum cooldown in seconds between /new commands per user")
 	flag.BoolVar(&cfg.OutboundReplies, "outbound-replies", true, "Include reply-to and quote metadata when responding to user replies")
@@ -52,6 +54,9 @@ func Parse() *Config {
 	if env := os.Getenv("LXMF_ACP_NAME"); env != "" && cfg.DisplayName == "LXMF Agent" {
 		cfg.DisplayName = env
 	}
+	if env := os.Getenv("LXMF_ACP_ADMIN"); env != "" && cfg.Admin == "" {
+		cfg.Admin = env
+	}
 	if env := os.Getenv("LXMF_ACP_ALLOWLIST"); env != "" && allowlistStr == "" {
 		allowlistStr = env
 	}
@@ -69,6 +74,10 @@ func Parse() *Config {
 		if val, err := strconv.ParseBool(env); err == nil {
 			cfg.OutboundReplies = val
 		}
+	}
+
+	if cfg.Admin != "" {
+		cfg.Admin = strings.ToLower(strings.Trim(cfg.Admin, "<> \t\r\n"))
 	}
 
 	if allowlistStr != "" {

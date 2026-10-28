@@ -48,6 +48,13 @@ func main() {
 	log.Printf("RNS Shared:    %s", cfg.RNSAddr)
 	log.Printf("Display Name:  %q", cfg.DisplayName)
 	log.Printf("Agent Address: %s", lxmfClient.HexHash())
+	if cfg.Admin != "" {
+		log.Printf("Admin Address: %s (from config)", cfg.Admin)
+	} else if admin := store.GetAdmin(); admin != "" {
+		log.Printf("Admin Address: %s (from store)", admin)
+	} else {
+		log.Printf("Admin Address: Unassigned (first user will claim admin)")
+	}
 	if len(cfg.Allowlist) > 0 {
 		log.Printf("Allowlist:     %d peers configured", len(cfg.Allowlist))
 	} else {

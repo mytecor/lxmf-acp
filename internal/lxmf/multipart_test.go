@@ -223,6 +223,9 @@ func TestReplyFields(t *testing.T) {
 
 	// 1. WithReplyTo and ParseReplyFields
 	fields := WithReplyTo(nil, replyID, quote)
+	if rawQuote, ok := fields[FieldReplyQuote].([]byte); !ok || string(rawQuote) != quote {
+		t.Fatalf("fields[FieldReplyQuote] must be []byte (Ratspeak binary requirement), got %T: %v", fields[FieldReplyQuote], fields[FieldReplyQuote])
+	}
 	gotID, gotQuote := ParseReplyFields(fields)
 	if !bytes.Equal(gotID, replyID) {
 		t.Fatalf("gotID = %x, want %x", gotID, replyID)

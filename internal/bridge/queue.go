@@ -164,9 +164,11 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	// generating. Waiting for the stream keeps replies of one chat ordered.
 	var replyToID []byte
 	var replyQuote string
-	if q.bridge.cfg.OutboundReplies && len(msg.MessageID) > 0 && msg.Content != "" {
+	if q.bridge.cfg.OutboundReplies && len(msg.MessageID) > 0 {
 		replyToID = msg.MessageID
-		replyQuote = lxmf.MakeQuoteSnippet(msg.Content, 120)
+		if msg.Content != "" {
+			replyQuote = lxmf.MakeQuoteSnippet(msg.Content, 120)
+		}
 	}
 	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "", replyToID, replyQuote)
 	stopReason, err := q.bridge.acpClient.PromptStream(promptCtx, sessionID, promptText, stream.Write)

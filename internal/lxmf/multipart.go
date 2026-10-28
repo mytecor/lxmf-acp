@@ -234,6 +234,7 @@ func ParseReplyFields(fields map[any]any) ([]byte, string) {
 }
 
 // WithReplyTo returns a copy of fields with FIELD_REPLY_TO and optional FIELD_REPLY_QUOTE set.
+// FIELD_REPLY_QUOTE is encoded as raw bytes ([]byte) as required by LXMF/rsLXMF (Ratspeak).
 func WithReplyTo(fields map[any]any, replyTo []byte, replyQuote string) map[any]any {
 	out := make(map[any]any, len(fields)+2)
 	for k, v := range fields {
@@ -246,7 +247,7 @@ func WithReplyTo(fields map[any]any, replyTo []byte, replyQuote string) map[any]
 		out[FieldReplyTo] = append([]byte(nil), replyTo...)
 	}
 	if replyQuote != "" {
-		out[FieldReplyQuote] = replyQuote
+		out[FieldReplyQuote] = []byte(replyQuote)
 	}
 	return out
 }

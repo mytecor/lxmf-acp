@@ -183,9 +183,8 @@ func (s *replyStream) run() {
 			status = p.status
 		}
 		baseFields := map[any]any{lxmf.FieldRenderer: lxmf.RendererMarkdown}
-		if first && len(s.replyTo) > 0 && s.replyQuote != "" {
-			baseFields[lxmf.FieldReplyTo] = s.replyTo
-			baseFields[lxmf.FieldReplyQuote] = s.replyQuote
+		if first && len(s.replyTo) > 0 {
+			baseFields = lxmf.WithReplyTo(baseFields, s.replyTo, s.replyQuote)
 			log.Printf("[Bridge] Attaching reply metadata for %s: replyTo=%x, replyQuote=%q",
 				hex.EncodeToString(s.peerHash), s.replyTo, s.replyQuote)
 		}

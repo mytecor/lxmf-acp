@@ -977,8 +977,9 @@ func TestReplyHandling(t *testing.T) {
 	if !ok1 || !bytes.Equal(rep1, m1ID) {
 		t.Errorf("expected response to carry FieldReplyTo=%x, got %x", m1ID, rep1)
 	}
-	if firstAgentReply.Fields[lxmf.FieldReplyQuote] != "Hello agent" {
-		t.Errorf("expected response to carry FieldReplyQuote=%q, got %q", "Hello agent", firstAgentReply.Fields[lxmf.FieldReplyQuote])
+	quoteBytes1, ok1Quote := firstAgentReply.Fields[lxmf.FieldReplyQuote].([]byte)
+	if !ok1Quote || string(quoteBytes1) != "Hello agent" {
+		t.Errorf("expected response to carry FieldReplyQuote as []byte %q, got %T: %v", "Hello agent", firstAgentReply.Fields[lxmf.FieldReplyQuote], firstAgentReply.Fields[lxmf.FieldReplyQuote])
 	}
 
 	// 2. User replies to the assistant's previous message
@@ -1017,9 +1018,9 @@ func TestReplyHandling(t *testing.T) {
 	if !ok || !bytes.Equal(repField, m2ID) {
 		t.Errorf("expected response to carry FieldReplyTo=%x, got %x (ok=%v)", m2ID, repField, ok)
 	}
-	quoteField, ok := secondAgentReply.Fields[lxmf.FieldReplyQuote].(string)
-	if !ok || quoteField != "Option A please" {
-		t.Errorf("expected response to carry FieldReplyQuote=%q, got %q (ok=%v)", "Option A please", quoteField, ok)
+	quoteField, ok := secondAgentReply.Fields[lxmf.FieldReplyQuote].([]byte)
+	if !ok || string(quoteField) != "Option A please" {
+		t.Errorf("expected response to carry FieldReplyQuote=%q, got %q (ok=%v)", "Option A please", string(quoteField), ok)
 	}
 
 	// 3. User replies with FieldReplyQuote when target message is not in cache
@@ -1261,4 +1262,65 @@ func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 	if len(mockA.getPrompts()) != promptsBefore {
 		t.Fatalf("revoked user's message was processed by agent!")
 	}
+}
+
+func TestAutoClaimAdminFromDynamicChat(t *testing.T) {
+	b, mockL, mockA, store, initialID, _ := setupTestBridge(t)
+	defer b.Close()
+
+	initialHash := initialID.DestinationHashFor(reticulumLxmf.FullName())
+	initHex := hex.EncodeToString(initialHash)
+
+	// Simulate an existing database where root identity was unowned and admin is empty
+	_ = store.SaveIdentity(storage.IdentityRecord{
+		Hash:      initHex,
+		Owner:     "",
+		CreatedAt: time.Now(),
+	})
+
+	userHash := []byte("user_with_dynamic_chat_12345678")
+	userHex := hex.EncodeToString(userHash)
+
+	// User creates/has a personal chat
+	chatID, _ := rns.NewIdentity()
+	chatHash := chatID.DestinationHashFor(reticulumLxmf.FullName())
+	chatHex := hex.EncodeToString(chatHash)
+	_ = mockL.RegisterIdentity(chatID)
+	_ = store.SaveIdentity(storage.IdentityRecord{
+		Hash:       chatHex,
+		PrivateKey: hex.EncodeToString(chatID.PrivateKey()),
+		Owner:      userHex,
+		CreatedAt:  time.Now(),
+	})
+
+	// User invokes /allow from their personal chat
+	newPeerHash := []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00}
+	newPeerHex := hex.EncodeToString(newPeerHash)
+
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  chatHash,
+		SenderHash: userHash,
+		MessageID:  []byte("allow-from-dynamic"),
+		Title:      "Allow",
+		Content:    "/allow " + newPeerHex,
+	})
+
+	waitFor(t, 2*time.Second, func() bool {
+		for _, s := range mockL.getSent() {
+			if bytes.Equal(s.To, userHash) && containsStr(s.Content, "Added user") {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Verify user became admin and claimed root identity
+	if store.GetAdmin() != userHex {
+		t.Fatalf("expected admin to be %s, got %s", userHex, store.GetAdmin())
+	}
+	rootRec, found := store.GetIdentity(initHex)
+	if !found || rootRec.Owner != userHex {
+		t.Fatalf("expected root identity owner to be %s, got %+v", userHex, rootRec)
+	}
+	_ = mockA
 }

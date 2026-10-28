@@ -64,6 +64,7 @@ go build -o lxmf-acp ./cmd/lxmf-acp
 | `--acp` | `LXMF_ACP_ENDPOINT` | `ws://localhost:8080/acp` | WebSocket URL of ACP agent |
 | `--rns` | `LXMF_ACP_RNS` | `127.0.0.1:37428` | TCP address of Reticulum shared instance (`rnsd`) |
 | `--name` | `LXMF_ACP_NAME` | `LXMF Agent` | Agent display name for LXMF announces |
+| `--admin` | `LXMF_ACP_ADMIN` | *(empty)* | Administrator destination hash (grants rights for `/allow`, `/revoke`, `/whitelist`) |
 | `--allowlist` | `LXMF_ACP_ALLOWLIST` | *(empty)* | Comma-separated list of allowed LXMF destination hashes (empty allows all) |
 | `--max-user-identities` | `LXMF_ACP_MAX_USER_IDENTITIES` | `20` | Maximum dynamic identities allowed per user (0 for unlimited) |
 | `--new-chat-cooldown` | `LXMF_ACP_NEW_CHAT_COOLDOWN` | `5` | Minimum cooldown in seconds between `/new` commands per user |
