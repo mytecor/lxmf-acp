@@ -1,0 +1,78 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/mytecor/lxmf-acp/internal/acp"
+	"github.com/mytecor/lxmf-acp/internal/bridge"
+	"github.com/mytecor/lxmf-acp/internal/config"
+	"github.com/mytecor/lxmf-acp/internal/lxmf"
+	"github.com/mytecor/lxmf-acp/internal/storage"
+)
+
+func main() {
+	cfg := config.Parse()
+
+	log.Println("==================================================")
+	log.Println("       LXMF-ACP: Autonomous Agent Adapter         ")
+	log.Println("==================================================")
+
+	// 1. Identity
+	identity, err := lxmf.LoadOrCreateIdentity(cfg.IdentityPath)
+	if err != nil {
+		log.Fatalf("Fatal: failed to load or create identity: %v", err)
+	}
+	log.Printf("Identity file: %s", cfg.IdentityPath)
+
+	// 2. State Store
+	store, err := storage.NewStore(cfg.StatePath)
+	if err != nil {
+		log.Fatalf("Fatal: failed to open state store: %v", err)
+	}
+	log.Printf("State file:    %s", cfg.StatePath)
+
+	// 3. ACP Client
+	acpClient := acp.NewClient(cfg.ACPEndpoint)
+	log.Printf("ACP Endpoint:  %s", cfg.ACPEndpoint)
+
+	// 4. LXMF Client
+	lxmfClient, err := lxmf.NewClient(cfg.RNSAddr, cfg.DisplayName, identity)
+	if err != nil {
+		log.Fatalf("Fatal: failed to create LXMF client: %v", err)
+	}
+	log.Printf("RNS Shared:    %s", cfg.RNSAddr)
+	log.Printf("Display Name:  %q", cfg.DisplayName)
+	log.Printf("Agent Address: %s", lxmfClient.HexHash())
+	if len(cfg.Allowlist) > 0 {
+		log.Printf("Allowlist:     %d peers configured", len(cfg.Allowlist))
+	} else {
+		log.Printf("Allowlist:     Disabled (public access)")
+	}
+
+	// 5. Bridge
+	b := bridge.NewBridge(cfg, lxmfClient, acpClient, store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := b.Start(ctx); err != nil {
+		log.Fatalf("Fatal: failed to start bridge: %v", err)
+	}
+
+	fmt.Printf("\n[READY] lxmf-acp is active and listening for messages!\n")
+	fmt.Printf("[READY] Send LXMF messages to destination: <%s>\n\n", lxmfClient.HexHash())
+
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	<-sigChan
+	log.Println("\nReceived shutdown signal. Stopping...")
+	_ = b.Close()
+	log.Println("Shutdown complete.")
+}

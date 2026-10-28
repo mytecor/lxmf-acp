@@ -1,0 +1,16 @@
+# Binaries
+/lxmf-acp
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Identity and State files (root runtime artifacts)
+/identity
+/identity.*
+/state.json
+/state.*.json
+*.tmp
+
+# OS
+.DS_Store
