@@ -84,12 +84,18 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	log.Printf("[Queue] Processing message for %s from %s (id: %x, isReply: %v, replyTo: %x, replyQuote: %q): %q",
 		q.localHex, q.peerHex, msg.MessageID, msg.IsReply(), msg.ReplyTo, msg.ReplyQuote, text)
 
+	if q.toolCommand(text) {
+		return
+	}
+
 	// Command: /help
 	if text == "/help" {
 		reply := "**LXMF-ACP Agent Bridge commands:**\n\n" +
 			"- `/new` — Start a new chat with a fresh conversation session\n" +
 			"- `/cancel` — Cancel current generation\n" +
-			"- `/help` — Show this message"
+			"- `/help` — Show this message\n" +
+			"- `/tools off|compact|verbose` — Set tool display for this chat\n" +
+			"- `/tool <number>` — Show details of a recent tool call"
 		if q.bridge.isAdmin(q.peerHex) {
 			reply += "\n\n**Admin commands:**\n" +
 				"- `/allow <hash>` — Add user to whitelist and open a personal chat with them\n" +
@@ -171,7 +177,9 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 		}
 	}
 	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "", replyToID, replyQuote)
-	stopReason, err := q.bridge.acpClient.PromptStream(promptCtx, sessionID, promptText, stream.Write)
+	reporter := newToolReporter(stream, q.bridge.store, toolBatchInterval)
+	stopReason, err := q.bridge.acpClient.PromptEvents(promptCtx, sessionID, promptText, reporter.Event)
+	reporter.Finish(stopReason == stopReasonCancelled || errors.Is(err, context.Canceled))
 	switch {
 	case err == nil && stopReason == stopReasonCancelled:
 		log.Printf("[Bridge] Prompt cancelled for (%s, %s)", q.localHex, q.peerHex)

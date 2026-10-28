@@ -20,6 +20,8 @@ type outPart struct {
 	content string
 	final   bool
 	status  lxmf.Status
+	notice  bool
+	fields  map[any]any
 }
 
 // replyStream turns a streamed ACP reply into a chain of LXMF messages.
@@ -43,12 +45,13 @@ type replyStream struct {
 	store      *storage.Store
 	seg        *Segmenter
 
-	mu       sync.Mutex
-	cond     *sync.Cond
-	queue    []outPart
-	finished bool
-	enqueued int
-	err      error
+	mu         sync.Mutex
+	cond       *sync.Cond
+	queue      []outPart
+	finished   bool
+	enqueued   int
+	hasNotices bool
+	err        error
 
 	done chan struct{}
 }
@@ -85,6 +88,30 @@ func (s *replyStream) Write(chunk string) {
 	}
 }
 
+// Notice queues an independent tool message on the same delivery worker.
+// Flush preceding text so tool activity cannot overtake buffered commentary.
+// Notices never participate in the answer's continuation chain.
+func (s *replyStream) Notice(title, content string, fields map[any]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return
+	}
+	if rest := s.seg.Flush(); rest != "" {
+		s.enqueueLocked(outPart{title: s.title, content: rest})
+	}
+	seg := NewSegmenter(s.seg.maxUnits, s.seg.maxBytes)
+	parts := seg.Write(content)
+	if rest := seg.Flush(); rest != "" {
+		parts = append(parts, rest)
+	}
+	for _, part := range parts {
+		s.queue = append(s.queue, outPart{title: title, content: part, notice: true, fields: fields})
+	}
+	s.hasNotices = true
+	s.cond.Broadcast()
+}
+
 // Finish closes the stream with a terminal status. For StatusFailed,
 // errText (if non-empty) becomes the content of the final message, and any
 // still-buffered reply text is sent as the preceding part.
@@ -108,11 +135,11 @@ func (s *replyStream) Finish(status lxmf.Status, errTitle, errText string) {
 		s.enqueueLocked(outPart{title: title, content: limitText(errText), final: true, status: status})
 	case rest != "" && (s.enqueued > 0 || strings.TrimSpace(rest) != ""):
 		s.enqueueLocked(outPart{title: s.title, content: rest, final: true, status: status})
-	case s.enqueued == 0 && status == lxmf.StatusCompleted:
+	case s.enqueued == 0 && !s.hasNotices && status == lxmf.StatusCompleted:
 		s.enqueueLocked(outPart{title: s.title, content: emptyReplyText, final: true, status: status})
 	case s.enqueued > 0:
-		// Unreachable by construction (parts are only cut when text
-		// follows), kept as a safety net so a started chain always ends.
+		// A notice can flush the last text before the turn ends. Close
+		// that answer chain even when no further text followed the notice.
 		s.enqueueLocked(outPart{title: s.title, content: "", final: true, status: status})
 	}
 	// Otherwise (cancelled/failed without any text): nothing to send.
@@ -189,14 +216,22 @@ func (s *replyStream) run() {
 				hex.EncodeToString(s.peerHash), s.replyTo, s.replyQuote)
 		}
 		fields := lxmf.BuildMultipartFields(baseFields, prev, first && !p.final, status)
+		role := "assistant"
+		if p.notice {
+			fields = lxmf.WithRenderer(p.fields, lxmf.RendererPlain)
+			if len(s.replyTo) > 0 {
+				fields = lxmf.WithReplyTo(fields, s.replyTo, s.replyQuote)
+			}
+			role = "tool"
+		}
 
 		id, err := s.client.SendMessage(s.localHash, s.peerHash, lxmf.OutboundMessage{
 			Title:   p.title,
 			Content: p.content,
 			Fields:  fields,
-			Direct:  !single, // multipart chains always use LXMF DIRECT
+			Direct:  p.notice || !single, // multipart chains always use LXMF DIRECT
 		})
-		if err == nil && len(id) == 0 && !p.final {
+		if err == nil && len(id) == 0 && !p.final && !p.notice {
 			err = errors.New("delivery returned no message hash")
 		}
 		if err != nil {
@@ -207,20 +242,22 @@ func (s *replyStream) run() {
 		}
 		if len(id) > 0 {
 			if s.history != nil {
-				s.history.Record(id, s.chatKey, "assistant", p.content)
+				s.history.Record(id, s.chatKey, role, p.content)
 			}
 			if s.store != nil {
 				_ = s.store.SaveMessage(storage.MessageEntry{
 					ID:        hex.EncodeToString(id),
 					ChatKey:   s.chatKey,
-					Role:      "assistant",
+					Role:      role,
 					Content:   p.content,
 					Timestamp: time.Now(),
 				})
 			}
 		}
-		prev = id
-		first = false
+		if !p.notice {
+			prev = id
+			first = false
+		}
 	}
 }
 

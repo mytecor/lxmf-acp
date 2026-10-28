@@ -10,11 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mytecor/lxmf-acp/internal/acp"
 	"github.com/mytecor/lxmf-acp/internal/config"
 	"github.com/mytecor/lxmf-acp/internal/lxmf"
 	"github.com/mytecor/lxmf-acp/internal/storage"
-	rns "github.com/thatSFguy/reticulum-go/rns"
 	reticulumLxmf "github.com/thatSFguy/reticulum-go/lxmf"
+	rns "github.com/thatSFguy/reticulum-go/rns"
 )
 
 type LXMFClient interface {
@@ -42,9 +43,8 @@ type ACPClient interface {
 	CanLoadSession() bool
 	LoadSession(ctx context.Context, sessionID string) error
 	CreateSession(ctx context.Context) (string, error)
-	// PromptStream streams agent_message_chunk text to onChunk and returns
-	// the turn's stop reason.
-	PromptStream(ctx context.Context, sessionID, text string, onChunk func(string)) (string, error)
+	// PromptEvents emits ordered prompt-scoped text and tool updates.
+	PromptEvents(ctx context.Context, sessionID, text string, onEvent func(acp.Event)) (string, error)
 	CancelPrompt(sessionID string) bool
 }
 

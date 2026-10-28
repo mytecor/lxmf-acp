@@ -188,6 +188,15 @@ const StopReasonCancelled = string(schema.StopReasonCancelled)
 // agent_message_chunk as it arrives. It returns the turn's stop reason once
 // the turn has ended.
 func (c *Client) PromptStream(ctx context.Context, sessionID, text string, onChunk func(string)) (string, error) {
+	return c.PromptEvents(ctx, sessionID, text, func(event Event) {
+		if event.Text != "" && onChunk != nil {
+			onChunk(event.Text)
+		}
+	})
+}
+
+// PromptEvents emits ordered text and tool events from this prompt only.
+func (c *Client) PromptEvents(ctx context.Context, sessionID, text string, onEvent func(Event)) (string, error) {
 	if err := c.EnsureConnected(ctx); err != nil {
 		return "", err
 	}
@@ -203,6 +212,7 @@ func (c *Client) PromptStream(ctx context.Context, sessionID, text string, onChu
 	session := agent.Session(schema.SessionID(sessionID))
 
 	promptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	c.activeMu.Lock()
 	c.activeTurn[sessionID] = cancel
 	c.activeMu.Unlock()
@@ -219,10 +229,8 @@ func (c *Client) PromptStream(ctx context.Context, sessionID, text string, onChu
 	}
 
 	for update := range turn.Updates() {
-		if chunk, ok := update.As[schema.SessionUpdateAgentMessageChunk](); ok {
-			if t, ok := acp1.TextOf(chunk.Content); ok && t != "" && onChunk != nil {
-				onChunk(t)
-			}
+		if event, ok := eventFromUpdate(update); ok && onEvent != nil {
+			onEvent(event)
 		}
 	}
 

@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mytecor/lxmf-acp/internal/acp"
 	"github.com/mytecor/lxmf-acp/internal/config"
 	"github.com/mytecor/lxmf-acp/internal/lxmf"
 	"github.com/mytecor/lxmf-acp/internal/storage"
@@ -166,10 +167,10 @@ func (m *mockLXMF) SetMessageHandler(h lxmf.MessageHandler) {
 }
 
 func (m *mockLXMF) RestoreKnownIdentities(identities []*rns.KnownIdentity) {}
-func (m *mockLXMF) KnownSnapshot() []*rns.KnownIdentity                   { return nil }
-func (m *mockLXMF) PinDestinations(destHashes [][]byte)                   {}
-func (m *mockLXMF) RequestPath(destHash []byte) error                     { return nil }
-func (m *mockLXMF) SetAnnounceHandler(h func(*rns.Announce))              {}
+func (m *mockLXMF) KnownSnapshot() []*rns.KnownIdentity                    { return nil }
+func (m *mockLXMF) PinDestinations(destHashes [][]byte)                    {}
+func (m *mockLXMF) RequestPath(destHash []byte) error                      { return nil }
+func (m *mockLXMF) SetAnnounceHandler(h func(*rns.Announce))               {}
 
 func (m *mockLXMF) getSent() []sentMsg {
 	m.mu.Lock()
@@ -250,6 +251,10 @@ func (m *mockACP) PromptStream(ctx context.Context, sessionID, text string, onCh
 	}
 	onChunk("Agent reply: " + text)
 	return "end_turn", nil
+}
+
+func (m *mockACP) PromptEvents(ctx context.Context, sessionID, text string, onEvent func(acp.Event)) (string, error) {
+	return m.PromptStream(ctx, sessionID, text, func(chunk string) { onEvent(acp.Event{Text: chunk}) })
 }
 
 func (m *mockACP) getPrompts() []string {

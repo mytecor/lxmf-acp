@@ -38,6 +38,7 @@ type MessageEntry struct {
 }
 
 type State struct {
+	ToolChats       map[string]ToolChat           `json:"toolChats,omitempty"`
 	Admin           string                        `json:"admin,omitempty"`
 	Allowlist       []string                      `json:"allowlist,omitempty"`
 	Identities      map[string]IdentityRecord     `json:"identities"`
