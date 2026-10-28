@@ -28,7 +28,7 @@ Sideband / Columba
   - `/bridge revoke <hash>` — *(Admin only)* Remove a user from the whitelist.
   - `/bridge whitelist` — *(Admin only)* Display currently whitelisted destination hashes and the administrator.
 - **Access Control & Dynamic Whitelist**: Persistent whitelist stored in `state.json` with CLI `--allowlist` seeding. Unauthorized users are blocked, and when an admin adds a user, the bot initiates the conversation directly.
-- **Persistent State**: Persists private keys of generated identities, ownership records, and session mappings with atomic writes.
+- **Persistent State**: Stores each chat’s private key, owner, activity, and optional ACP session together in `chats`, with atomic writes. The peer cache is stored separately in `knownIdentities`.
 - **Multipart LXMF Streaming**: Transparently handles arbitrary-length responses via standard `FIELD_CONTINUATION (0x42)` and namespaced `FIELD_CUSTOM_META (0xFD)`. Segments text into parts under 10 000 UTF-16 units without breaking unicode/whitespace. Delivers sequentially via `LXMF DIRECT` during generation and reassembles incoming multipart chains from peer instances before invoking ACP. Compatible with Sideband, Columba, and Ratspeak.
 - **Tool Call Display**: Forwards ACP tool calls as plain-text activity messages readable in Ratspeak and Columba. Compact display is enabled by default; `/bridge tools off|compact|verbose` selects a persistent per-chat mode, and `/bridge tool <number>` retrieves details of a recent call. Fast calls are batched, long calls show progress, and tool messages share the answer delivery queue without joining its multipart chain.
 - **Markdown Rendering**: Sets LXMF `FIELD_RENDERER (0x0F)` to `RENDERER_MARKDOWN (0x02)` across all agent responses, notifications, and commands. Compatible clients (such as Columba, Sideband, and MeshChat) render formatted markdown, lists, code blocks, and emphasis natively.
@@ -147,7 +147,7 @@ lxmf-acp/
 │       └── main.go       # Entrypoint, CLI flag parsing, execution and graceful shutdown
 ├── internal/
 │   ├── config/           # Configuration and allowlist validation
-│   ├── storage/          # Atomic JSON store for identities and peer ↔ ACP sessions
+│   ├── storage/          # Atomic JSON store for chats and known peer identities
 │   ├── lxmf/
 │   │   ├── client.go     # LXMF client (Transport, Delivery, Announce, Reconnecting TCP)
 │   │   └── identity.go   # Reticulum identity loader / generator (64-byte keypair)

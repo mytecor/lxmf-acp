@@ -384,7 +384,7 @@ func TestScenario1_NewFromInitialChat(t *testing.T) {
 	// Find the new identity
 	var newChatHash []byte
 	var newChatHex string
-	for _, rec := range store.GetAllIdentities() {
+	for _, rec := range store.GetAllChats() {
 		if rec.Hash != initialHex {
 			newChatHex = rec.Hash
 			newChatHash, _ = hex.DecodeString(rec.Hash)
@@ -461,7 +461,7 @@ func TestScenario2_NewFromDynamicChat(t *testing.T) {
 
 	var chat1Hash []byte
 	var chat1Hex string
-	for _, rec := range store.GetAllIdentities() {
+	for _, rec := range store.GetAllChats() {
 		if rec.Hash != initialHex {
 			chat1Hex = rec.Hash
 			chat1Hash, _ = hex.DecodeString(rec.Hash)
@@ -506,7 +506,7 @@ func TestScenario2_NewFromDynamicChat(t *testing.T) {
 	// Find the 3rd identity
 	var chat2Hash []byte
 	var chat2Hex string
-	for _, rec := range store.GetAllIdentities() {
+	for _, rec := range store.GetAllChats() {
 		if rec.Hash != initialHex && rec.Hash != chat1Hex {
 			chat2Hex = rec.Hash
 			chat2Hash, _ = hex.DecodeString(rec.Hash)
@@ -587,7 +587,7 @@ func TestScenario3_RestartRestoresIdentitiesAndRecoversACPSessions(t *testing.T)
 
 	var dynamicHash []byte
 	var dynamicHex string
-	for _, rec := range store.GetAllIdentities() {
+	for _, rec := range store.GetAllChats() {
 		if rec.Hash != initialHex {
 			dynamicHex = rec.Hash
 			dynamicHash, _ = hex.DecodeString(rec.Hash)
@@ -748,7 +748,7 @@ func TestOwnerIsolation(t *testing.T) {
 	})
 
 	var dynamicHash []byte
-	for _, rec := range store.GetAllIdentities() {
+	for _, rec := range store.GetAllChats() {
 		if rec.Hash != hex.EncodeToString(initialHash) {
 			dynamicHash, _ = hex.DecodeString(rec.Hash)
 			break
@@ -798,7 +798,7 @@ func TestWelcomeDeliveryFailureReportsDestinationInSourceChat(t *testing.T) {
 
 	// Find the created identity
 	var newChatHex string
-	for _, rec := range store.GetAllIdentities() {
+	for _, rec := range store.GetAllChats() {
 		if rec.Hash != hex.EncodeToString(initialHash) {
 			newChatHex = rec.Hash
 			break
@@ -1185,7 +1185,7 @@ func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 	}
 
 	// Find the dedicated chat created for user
-	userChats := store.GetIdentitiesForOwner(userHex)
+	userChats := store.GetChatsForOwner(userHex)
 	if len(userChats) != 1 {
 		t.Fatalf("expected 1 dedicated chat for user, got %d", len(userChats))
 	}
@@ -1281,7 +1281,7 @@ func TestAutoClaimAdminFromDynamicChat(t *testing.T) {
 	initHex := hex.EncodeToString(initialHash)
 
 	// Simulate an existing database where root identity was unowned and admin is empty
-	_ = store.SaveIdentity(storage.IdentityRecord{
+	_ = store.SaveChat(storage.ChatRecord{
 		Hash:      initHex,
 		Owner:     "",
 		CreatedAt: time.Now(),
@@ -1295,7 +1295,7 @@ func TestAutoClaimAdminFromDynamicChat(t *testing.T) {
 	chatHash := chatID.DestinationHashFor(reticulumLxmf.FullName())
 	chatHex := hex.EncodeToString(chatHash)
 	_ = mockL.RegisterIdentity(chatID)
-	_ = store.SaveIdentity(storage.IdentityRecord{
+	_ = store.SaveChat(storage.ChatRecord{
 		Hash:       chatHex,
 		PrivateKey: hex.EncodeToString(chatID.PrivateKey()),
 		Owner:      userHex,
@@ -1327,7 +1327,7 @@ func TestAutoClaimAdminFromDynamicChat(t *testing.T) {
 	if store.GetAdmin() != userHex {
 		t.Fatalf("expected admin to be %s, got %s", userHex, store.GetAdmin())
 	}
-	rootRec, found := store.GetIdentity(initHex)
+	rootRec, found := store.GetChat(initHex)
 	if !found || rootRec.Owner != userHex {
 		t.Fatalf("expected root identity owner to be %s, got %+v", userHex, rootRec)
 	}

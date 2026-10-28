@@ -13,29 +13,22 @@ import (
 	"github.com/thatSFguy/reticulum-go/rns"
 )
 
-type IdentityRecord struct {
+// ChatRecord survives ACP session resets; Hash is the local LXMF destination.
+type ChatRecord struct {
 	Hash           string    `json:"hash"`
-	PrivateKey     string    `json:"privateKey"`
+	PrivateKey     string    `json:"privateKey,omitempty"`
 	Owner          string    `json:"owner"`
 	SessionID      string    `json:"sessionId,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	LastActivityAt time.Time `json:"lastActivityAt,omitempty"`
-}
-
-type SessionEntry struct {
-	LocalDestination  string    `json:"localDestination,omitempty"`
-	RemoteDestination string    `json:"remoteDestination,omitempty"`
-	SessionID         string    `json:"sessionId"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
+	UpdatedAt      time.Time `json:"updatedAt,omitempty"`
 }
 
 type State struct {
 	ToolChats       map[string]ToolChat           `json:"toolChats,omitempty"`
 	Admin           string                        `json:"admin,omitempty"`
 	Allowlist       []string                      `json:"allowlist,omitempty"`
-	Identities      map[string]IdentityRecord     `json:"identities"`
-	Sessions        map[string]SessionEntry       `json:"sessions"`
+	Chats           map[string]ChatRecord         `json:"chats"`
 	KnownIdentities map[string]*rns.KnownIdentity `json:"knownIdentities,omitempty"`
 }
 
@@ -56,8 +49,7 @@ func NewStore(path string) (*Store, error) {
 	s := &Store{
 		path: path,
 		data: State{
-			Identities:      make(map[string]IdentityRecord),
-			Sessions:        make(map[string]SessionEntry),
+			Chats:           make(map[string]ChatRecord),
 			KnownIdentities: make(map[string]*rns.KnownIdentity),
 		},
 	}
@@ -86,61 +78,17 @@ func (s *Store) load() error {
 		return nil
 	}
 
-	// Read only timestamps from legacy history to preserve activity during migration.
-	// Message content is never retained in the store.
-	var loaded struct {
-		State
-		Messages map[string]struct {
-			ChatKey   string    `json:"chatKey"`
-			Timestamp time.Time `json:"timestamp"`
-		} `json:"messages"`
-	}
+	var loaded State
 	if err := json.Unmarshal(raw, &loaded); err != nil {
 		return fmt.Errorf("unmarshal json: %w", err)
 	}
-
-	if loaded.Sessions == nil {
-		loaded.Sessions = make(map[string]SessionEntry)
-	}
-	if loaded.Identities == nil {
-		loaded.Identities = make(map[string]IdentityRecord)
+	if loaded.Chats == nil {
+		loaded.Chats = make(map[string]ChatRecord)
 	}
 	if loaded.KnownIdentities == nil {
 		loaded.KnownIdentities = make(map[string]*rns.KnownIdentity)
 	}
-	// Older state files have no activity timestamp. Recover the best available
-	// date instead of making every restored address look newly active.
-	legacy := make(map[string]bool)
-	for key, rec := range loaded.Identities {
-		if rec.LastActivityAt.IsZero() {
-			legacy[key] = true
-			rec.LastActivityAt = rec.CreatedAt
-			loaded.Identities[key] = rec
-		}
-	}
-	recoverActivity := func(local string, at time.Time) {
-		if !legacy[local] {
-			return
-		}
-		rec := loaded.Identities[local]
-		if at.After(rec.LastActivityAt) {
-			rec.LastActivityAt = at
-			loaded.Identities[local] = rec
-		}
-	}
-	for _, entry := range loaded.Sessions {
-		recoverActivity(entry.LocalDestination, entry.UpdatedAt)
-	}
-	for _, entry := range loaded.Messages {
-		local, _, ok := strings.Cut(entry.ChatKey, ":")
-		if ok {
-			recoverActivity(local, entry.Timestamp)
-		}
-	}
-	s.data = loaded.State
-	if loaded.Messages != nil {
-		return s.saveLocked() // Remove legacy history from disk on load.
-	}
+	s.data = loaded
 	return nil
 }
 
@@ -166,120 +114,89 @@ func (s *Store) saveLocked() error {
 func (s *Store) GetSession(localHex, remoteHex string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	key := SessionKey(localHex, remoteHex)
-	entry, ok := s.data.Sessions[key]
-	if (!ok || entry.SessionID == "") && localHex != "" {
-		// Fallback for legacy state files where key was just remoteHex
-		entry, ok = s.data.Sessions[remoteHex]
-	}
-	if !ok || entry.SessionID == "" {
-		return "", false
-	}
-	return entry.SessionID, true
+	chat, ok := s.data.Chats[localHex]
+	return chat.SessionID, ok && strings.EqualFold(chat.Owner, remoteHex) && chat.SessionID != ""
 }
 
 func (s *Store) SetSession(localHex, remoteHex, sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	chat := s.data.Chats[localHex]
+	if chat.Owner != "" && !strings.EqualFold(chat.Owner, remoteHex) {
+		return fmt.Errorf("chat %s belongs to another peer", localHex)
+	}
 	now := time.Now()
-	key := SessionKey(localHex, remoteHex)
-	entry, exists := s.data.Sessions[key]
-	if !exists {
-		entry.CreatedAt = now
+	if chat.CreatedAt.IsZero() {
+		chat.CreatedAt = now
 	}
-	entry.LocalDestination = localHex
-	entry.RemoteDestination = remoteHex
-	entry.SessionID = sessionID
-	entry.UpdatedAt = now
-
-	s.data.Sessions[key] = entry
-
-	// Keep IdentityRecord.SessionID in sync if local destination is registered
-	if localHex != "" {
-		if idRec, exists := s.data.Identities[localHex]; exists {
-			idRec.SessionID = sessionID
-			s.data.Identities[localHex] = idRec
-		}
-	}
-
+	chat.Hash, chat.Owner = localHex, remoteHex
+	chat.SessionID, chat.UpdatedAt = sessionID, now
+	s.data.Chats[localHex] = chat
 	return s.saveLocked()
 }
 
 func (s *Store) DeleteSession(localHex, remoteHex string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	key := SessionKey(localHex, remoteHex)
-	_, exists := s.data.Sessions[key]
-	if !exists && localHex != "" {
-		key = remoteHex
-		_, exists = s.data.Sessions[key]
-	}
-	if !exists {
+	chat, ok := s.data.Chats[localHex]
+	if !ok || !strings.EqualFold(chat.Owner, remoteHex) {
 		return nil
 	}
-
-	delete(s.data.Sessions, key)
-	if localHex != "" {
-		if idRec, ok := s.data.Identities[localHex]; ok {
-			idRec.SessionID = ""
-			s.data.Identities[localHex] = idRec
-		}
-	}
+	chat.SessionID = ""
+	chat.UpdatedAt = time.Now()
+	s.data.Chats[localHex] = chat
 	return s.saveLocked()
 }
 
-func (s *Store) SaveIdentity(entry IdentityRecord) error {
+func (s *Store) SaveChat(entry ChatRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.data.Identities == nil {
-		s.data.Identities = make(map[string]IdentityRecord)
+	if s.data.Chats == nil {
+		s.data.Chats = make(map[string]ChatRecord)
 	}
-	s.data.Identities[entry.Hash] = entry
+	s.data.Chats[entry.Hash] = entry
 	return s.saveLocked()
 }
 
-func (s *Store) GetIdentity(localHex string) (IdentityRecord, bool) {
+func (s *Store) GetChat(localHex string) (ChatRecord, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entry, ok := s.data.Identities[localHex]
+	entry, ok := s.data.Chats[localHex]
 	return entry, ok
 }
 
-// TouchIdentity tracks real chat activity independently of ACP session creation.
-func (s *Store) TouchIdentity(localHex string, at time.Time) error {
+// TouchChat tracks real chat activity independently of ACP session creation.
+func (s *Store) TouchChat(localHex string, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rec, ok := s.data.Identities[localHex]
+	rec, ok := s.data.Chats[localHex]
 	if !ok || !at.After(rec.LastActivityAt) {
 		return nil
 	}
 	rec.LastActivityAt = at
-	s.data.Identities[localHex] = rec
+	s.data.Chats[localHex] = rec
 	return s.saveLocked()
 }
 
-func (s *Store) GetAllIdentities() []IdentityRecord {
+func (s *Store) GetAllChats() []ChatRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entries := make([]IdentityRecord, 0, len(s.data.Identities))
-	for _, entry := range s.data.Identities {
+	entries := make([]ChatRecord, 0, len(s.data.Chats))
+	for _, entry := range s.data.Chats {
 		entries = append(entries, entry)
 	}
 	return entries
 }
 
-func (s *Store) CountIdentitiesForOwner(ownerHex string) int {
+func (s *Store) CountChatsForOwner(ownerHex string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	count := 0
-	for _, entry := range s.data.Identities {
+	for _, entry := range s.data.Chats {
 		if entry.PrivateKey != "" && strings.EqualFold(entry.Owner, ownerHex) {
 			count++
 		}
@@ -287,12 +204,12 @@ func (s *Store) CountIdentitiesForOwner(ownerHex string) int {
 	return count
 }
 
-func (s *Store) GetIdentitiesForOwner(ownerHex string) []IdentityRecord {
+func (s *Store) GetChatsForOwner(ownerHex string) []ChatRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var res []IdentityRecord
-	for _, entry := range s.data.Identities {
+	var res []ChatRecord
+	for _, entry := range s.data.Chats {
 		if strings.EqualFold(entry.Owner, ownerHex) {
 			res = append(res, entry)
 		}

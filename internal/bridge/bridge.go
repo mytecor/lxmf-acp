@@ -95,7 +95,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 
 	// 2. Restore and register all stored identities
-	allRecords := b.store.GetAllIdentities()
+	allRecords := b.store.GetAllChats()
 	for _, rec := range allRecords {
 		if rec.PrivateKey == "" {
 			continue
@@ -139,15 +139,15 @@ func (b *Bridge) Start(ctx context.Context) error {
 	initHex := b.lxmfClient.HexHash()
 	if initHex != "" {
 		admin := b.store.GetAdmin()
-		if rec, found := b.store.GetIdentity(initHex); !found {
-			_ = b.store.SaveIdentity(storage.IdentityRecord{
+		if rec, found := b.store.GetChat(initHex); !found {
+			_ = b.store.SaveChat(storage.ChatRecord{
 				Hash:      initHex,
 				Owner:     admin,
 				CreatedAt: time.Now(),
 			})
 		} else if rec.Owner == "" && admin != "" {
 			rec.Owner = admin
-			_ = b.store.SaveIdentity(rec)
+			_ = b.store.SaveChat(rec)
 		} else if rec.Owner != "" && admin == "" {
 			_ = b.store.SetAdmin(rec.Owner)
 			_, _ = b.store.AddToAllowlist(rec.Owner)
@@ -235,7 +235,7 @@ func (b *Bridge) isAdmin(senderHex string) bool {
 	if admin == "" {
 		initHex := b.lxmfClient.HexHash()
 		if initHex != "" {
-			if rec, found := b.store.GetIdentity(initHex); found {
+			if rec, found := b.store.GetChat(initHex); found {
 				if rec.Owner != "" {
 					admin = rec.Owner
 					_ = b.store.SetAdmin(admin)
@@ -245,7 +245,7 @@ func (b *Bridge) isAdmin(senderHex string) bool {
 					admin = senderHex
 					_ = b.store.SetAdmin(admin)
 					rec.Owner = admin
-					_ = b.store.SaveIdentity(rec)
+					_ = b.store.SaveChat(rec)
 					log.Printf("[Bridge] Unassigned root chat %s and admin role claimed by: %s", initHex, admin)
 				}
 			}
@@ -265,12 +265,12 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 	}
 
 	// Check identity ownership: chat must only accept messages from its owner
-	idRecord, found := b.store.GetIdentity(localHex)
+	idRecord, found := b.store.GetChat(localHex)
 	if found {
 		if idRecord.Owner == "" {
 			// First user to message claims ownership & admin if unassigned
 			idRecord.Owner = senderHex
-			_ = b.store.SaveIdentity(idRecord)
+			_ = b.store.SaveChat(idRecord)
 			if b.store.GetAdmin() == "" {
 				_ = b.store.SetAdmin(senderHex)
 			}
@@ -278,7 +278,7 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 		} else if !strings.EqualFold(idRecord.Owner, senderHex) {
 			log.Printf("[Bridge] Rejected message for identity %s: sender %s is not the owner (%s)", localHex, senderHex, idRecord.Owner)
 			// Guide allowed user to their own personal chat or create one
-			userChats := b.store.GetIdentitiesForOwner(senderHex)
+			userChats := b.store.GetChatsForOwner(senderHex)
 			if len(userChats) > 0 {
 				notice := fmt.Sprintf("This chat belongs to another user. Please use your personal chat: `<%s>`", userChats[0].Hash)
 				_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", notice)
@@ -293,9 +293,9 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 	if b.store.GetAdmin() == "" {
 		initHex := b.lxmfClient.HexHash()
 		if initHex != "" {
-			if rootRec, foundRoot := b.store.GetIdentity(initHex); foundRoot && rootRec.Owner == "" {
+			if rootRec, foundRoot := b.store.GetChat(initHex); foundRoot && rootRec.Owner == "" {
 				rootRec.Owner = senderHex
-				_ = b.store.SaveIdentity(rootRec)
+				_ = b.store.SaveChat(rootRec)
 				_ = b.store.SetAdmin(senderHex)
 				log.Printf("[Bridge] Root chat %s and admin role claimed by active user: %s", initHex, senderHex)
 			}
@@ -306,7 +306,7 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 	// count, so a slow incoming transfer does not become dormant midway.
 	now := time.Now()
 	b.lxmfClient.SetIdentityLastActivity(msg.LocalHash, now)
-	if err := b.store.TouchIdentity(localHex, now); err != nil {
+	if err := b.store.TouchChat(localHex, now); err != nil {
 		log.Printf("[Bridge] Save chat activity: %v", err)
 	}
 	// Reassemble multipart chains; only complete prompts reach the queue.
@@ -399,7 +399,7 @@ func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
 
 	// 3. Maximum identities quota per user
 	if b.cfg.MaxIdentitiesPerUser > 0 {
-		count := b.store.CountIdentitiesForOwner(senderHex)
+		count := b.store.CountChatsForOwner(senderHex)
 		if count >= b.cfg.MaxIdentitiesPerUser {
 			log.Printf("[Bridge] Maximum identities reached for %s (count: %d, max: %d)", senderHex, count, b.cfg.MaxIdentitiesPerUser)
 			_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "Limit Reached", fmt.Sprintf("Maximum number of chats (%d) reached.", b.cfg.MaxIdentitiesPerUser))
@@ -419,13 +419,13 @@ func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
 	newDestHex := hex.EncodeToString(newDestHash)
 
 	// 5. Atomic persistence BEFORE sending welcome message
-	record := storage.IdentityRecord{
+	record := storage.ChatRecord{
 		Hash:       newDestHex,
 		PrivateKey: hex.EncodeToString(newID.PrivateKey()),
 		Owner:      senderHex,
 		CreatedAt:  time.Now(),
 	}
-	if err := b.store.SaveIdentity(record); err != nil {
+	if err := b.store.SaveChat(record); err != nil {
 		log.Printf("[Bridge] Failed to atomically save identity %s: %v", newDestHex, err)
 		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "Error", "Failed to save new chat.")
 		return
@@ -474,13 +474,13 @@ func (b *Bridge) createDedicatedChatFor(targetHash []byte, targetHex string, not
 	newDestHex := hex.EncodeToString(newDestHash)
 
 	// 2. Persist identity
-	record := storage.IdentityRecord{
+	record := storage.ChatRecord{
 		Hash:       newDestHex,
 		PrivateKey: hex.EncodeToString(newID.PrivateKey()),
 		Owner:      targetHex,
 		CreatedAt:  time.Now(),
 	}
-	if err := b.store.SaveIdentity(record); err != nil {
+	if err := b.store.SaveChat(record); err != nil {
 		return "", fmt.Errorf("save identity: %w", err)
 	}
 

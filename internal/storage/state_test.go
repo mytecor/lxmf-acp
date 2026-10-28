@@ -68,32 +68,32 @@ func TestStoreIdentities(t *testing.T) {
 	}
 
 	owner := "user1_aabbccddeeff0011223344556677"
-	id1 := IdentityRecord{
+	id1 := ChatRecord{
 		Hash:       "chat1_11223344556677889900aabbccd",
 		PrivateKey: "privkey1_deadbeef001122334455667788",
 		Owner:      owner,
 		CreatedAt:  time.Now(),
 	}
-	id2 := IdentityRecord{
+	id2 := ChatRecord{
 		Hash:       "chat2_99887766554433221100aabbccd",
 		PrivateKey: "privkey2_beefdead001122334455667788",
 		Owner:      owner,
 		CreatedAt:  time.Now(),
 	}
 
-	if err := store.SaveIdentity(id1); err != nil {
-		t.Fatalf("SaveIdentity id1 failed: %v", err)
+	if err := store.SaveChat(id1); err != nil {
+		t.Fatalf("SaveChat id1 failed: %v", err)
 	}
-	if err := store.SaveIdentity(id2); err != nil {
-		t.Fatalf("SaveIdentity id2 failed: %v", err)
-	}
-
-	if count := store.CountIdentitiesForOwner(owner); count != 2 {
-		t.Errorf("CountIdentitiesForOwner = %d; want 2", count)
+	if err := store.SaveChat(id2); err != nil {
+		t.Fatalf("SaveChat id2 failed: %v", err)
 	}
 
-	if count := store.CountIdentitiesForOwner("other_user"); count != 0 {
-		t.Errorf("CountIdentitiesForOwner(other) = %d; want 0", count)
+	if count := store.CountChatsForOwner(owner); count != 2 {
+		t.Errorf("CountChatsForOwner = %d; want 2", count)
+	}
+
+	if count := store.CountChatsForOwner("other_user"); count != 0 {
+		t.Errorf("CountChatsForOwner(other) = %d; want 0", count)
 	}
 
 	// Reload from disk
@@ -102,14 +102,14 @@ func TestStoreIdentities(t *testing.T) {
 		t.Fatalf("Reload NewStore failed: %v", err)
 	}
 
-	rec, ok := store2.GetIdentity(id1.Hash)
+	rec, ok := store2.GetChat(id1.Hash)
 	if !ok || rec.PrivateKey != id1.PrivateKey {
-		t.Errorf("GetIdentity failed or key mismatch: %+v", rec)
+		t.Errorf("GetChat failed or key mismatch: %+v", rec)
 	}
 
-	all := store2.GetAllIdentities()
+	all := store2.GetAllChats()
 	if len(all) != 2 {
-		t.Errorf("GetAllIdentities len = %d; want 2", len(all))
+		t.Errorf("GetAllChats len = %d; want 2", len(all))
 	}
 }
 

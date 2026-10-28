@@ -604,7 +604,7 @@ func TestConcurrentChatsDoNotMix(t *testing.T) {
 	}
 	local2 := user2ID.DestinationHashFor(reticulumLxmf.FullName())
 	_ = mockL.RegisterIdentity(user2ID)
-	_ = store.SaveIdentity(storage.IdentityRecord{
+	_ = store.SaveChat(storage.ChatRecord{
 		Hash:       hex.EncodeToString(local2),
 		PrivateKey: hex.EncodeToString(user2ID.PrivateKey()),
 		Owner:      hex.EncodeToString(user2),

@@ -186,7 +186,7 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	defer func() {
 		now := time.Now()
 		q.bridge.lxmfClient.SetIdentityLastActivity(q.localHash, now)
-		if err := q.bridge.store.TouchIdentity(q.localHex, now); err != nil {
+		if err := q.bridge.store.TouchChat(q.localHex, now); err != nil {
 			log.Printf("[Queue] Save chat activity: %v", err)
 		}
 	}()

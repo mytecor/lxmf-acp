@@ -153,7 +153,7 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 	c.tcpIface = tcpIface
 
-	c.transport = rns.NewTransport(nil)
+	c.transport = rns.NewTransport(log.New(log.Writer(), "[RNS] ", log.Flags()))
 	c.transport.AddInterface(tcpIface)
 	// The library's keepalives refresh its idle clock. Put keepalive after
 	// the idle deadline so unused outbound links expire instead of pinging forever.
