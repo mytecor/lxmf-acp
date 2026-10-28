@@ -1007,11 +1007,11 @@ func TestReplyHandling(t *testing.T) {
 		t.Fatalf("expected at least 2 prompts, got %d", len(prompts))
 	}
 	p2 := prompts[len(prompts)-1]
-	if !containsStr(p2, "[In reply to assistant:") {
-		t.Errorf("expected prompt to contain '[In reply to assistant:', got %q", p2)
+	if !containsStr(p2, "[In reply to message <"+hex.EncodeToString(firstAgentReply.ID)+">]") {
+		t.Errorf("expected reply ID in prompt, got %q", p2)
 	}
-	if !containsStr(p2, "Hello agent") {
-		t.Errorf("expected quoted content in prompt, got %q", p2)
+	if containsStr(p2, "Hello agent") {
+		t.Errorf("reply without quote unexpectedly recovered message text: %q", p2)
 	}
 	if !containsStr(p2, "Option A please") {
 		t.Errorf("expected user reply text in prompt, got %q", p2)
@@ -1029,7 +1029,7 @@ func TestReplyHandling(t *testing.T) {
 		t.Errorf("expected response to carry FieldReplyQuote=%q, got %q (ok=%v)", "Option A please", string(quoteField), ok)
 	}
 
-	// 3. User replies with FieldReplyQuote when target message is not in cache
+	// 3. User supplies the quoted context through FieldReplyQuote
 	unknownID := []byte{0xDE, 0xAD, 0xBE, 0xEF}
 	m3ID := []byte("user-msg-3")
 	mockL.handler(&lxmf.InboundMessage{
@@ -1058,7 +1058,6 @@ func TestReplyHandling(t *testing.T) {
 	// Must not produce invalid UTF-8 by slicing mid-codepoint.
 	longCyrillic := strings.Repeat("Да, вижу реплай! Тестируем длинный текст с русскими буквами. 🛠️ ", 20)
 	longID := []byte("long-msg-id-1")
-	b.history.Record(longID, hex.EncodeToString(initialHash)+":"+userHex, "assistant", longCyrillic)
 
 	m4ID := []byte("user-msg-4")
 	mockL.handler(&lxmf.InboundMessage{
@@ -1068,7 +1067,8 @@ func TestReplyHandling(t *testing.T) {
 		Title:      "Reply to long Russian",
 		Content:    "а сейчас?",
 		Fields: map[any]any{
-			lxmf.FieldReplyTo: longID,
+			lxmf.FieldReplyTo:    longID,
+			lxmf.FieldReplyQuote: longCyrillic,
 		},
 	})
 	time.Sleep(150 * time.Millisecond)
@@ -1077,6 +1077,9 @@ func TestReplyHandling(t *testing.T) {
 	p4 := prompts[len(prompts)-1]
 	if !containsStr(p4, "а сейчас?") {
 		t.Errorf("expected user text in p4, got %q", p4)
+	}
+	if !containsStr(p4, "> Да, вижу реплай!") || !containsStr(p4, "...") {
+		t.Fatalf("expected truncated client quote, got %q", p4)
 	}
 	// Verify valid UTF-8 and json marshaling
 	if !utf8.ValidString(p4) {

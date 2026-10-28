@@ -30,21 +30,12 @@ type SessionEntry struct {
 	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
-type MessageEntry struct {
-	ID        string    `json:"id"`
-	ChatKey   string    `json:"chatKey"`
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
 type State struct {
 	ToolChats       map[string]ToolChat           `json:"toolChats,omitempty"`
 	Admin           string                        `json:"admin,omitempty"`
 	Allowlist       []string                      `json:"allowlist,omitempty"`
 	Identities      map[string]IdentityRecord     `json:"identities"`
 	Sessions        map[string]SessionEntry       `json:"sessions"`
-	Messages        map[string]MessageEntry       `json:"messages,omitempty"`
 	KnownIdentities map[string]*rns.KnownIdentity `json:"knownIdentities,omitempty"`
 }
 
@@ -67,7 +58,6 @@ func NewStore(path string) (*Store, error) {
 		data: State{
 			Identities:      make(map[string]IdentityRecord),
 			Sessions:        make(map[string]SessionEntry),
-			Messages:        make(map[string]MessageEntry),
 			KnownIdentities: make(map[string]*rns.KnownIdentity),
 		},
 	}
@@ -96,7 +86,15 @@ func (s *Store) load() error {
 		return nil
 	}
 
-	var loaded State
+	// Read only timestamps from legacy history to preserve activity during migration.
+	// Message content is never retained in the store.
+	var loaded struct {
+		State
+		Messages map[string]struct {
+			ChatKey   string    `json:"chatKey"`
+			Timestamp time.Time `json:"timestamp"`
+		} `json:"messages"`
+	}
 	if err := json.Unmarshal(raw, &loaded); err != nil {
 		return fmt.Errorf("unmarshal json: %w", err)
 	}
@@ -106,9 +104,6 @@ func (s *Store) load() error {
 	}
 	if loaded.Identities == nil {
 		loaded.Identities = make(map[string]IdentityRecord)
-	}
-	if loaded.Messages == nil {
-		loaded.Messages = make(map[string]MessageEntry)
 	}
 	if loaded.KnownIdentities == nil {
 		loaded.KnownIdentities = make(map[string]*rns.KnownIdentity)
@@ -142,7 +137,10 @@ func (s *Store) load() error {
 			recoverActivity(local, entry.Timestamp)
 		}
 	}
-	s.data = loaded
+	s.data = loaded.State
+	if loaded.Messages != nil {
+		return s.saveLocked() // Remove legacy history from disk on load.
+	}
 	return nil
 }
 
@@ -378,68 +376,6 @@ func (s *Store) IsAllowed(peerHex string) bool {
 		}
 	}
 	return false
-}
-
-const maxStoredMessages = 200
-
-func (s *Store) SaveMessage(entry MessageEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if entry.ID == "" {
-		return nil
-	}
-	if entry.Timestamp.IsZero() {
-		entry.Timestamp = time.Now()
-	}
-
-	if s.data.Messages == nil {
-		s.data.Messages = make(map[string]MessageEntry)
-	}
-
-	if len(s.data.Messages) >= maxStoredMessages {
-		var oldestKey string
-		var oldestTime time.Time
-		first := true
-		for k, m := range s.data.Messages {
-			if first || m.Timestamp.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = m.Timestamp
-				first = false
-			}
-		}
-		if oldestKey != "" {
-			delete(s.data.Messages, oldestKey)
-		}
-	}
-
-	s.data.Messages[entry.ID] = entry
-	return s.saveLocked()
-}
-
-func (s *Store) GetMessage(idHex string) (MessageEntry, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.data.Messages == nil {
-		return MessageEntry{}, false
-	}
-	entry, ok := s.data.Messages[idHex]
-	return entry, ok
-}
-
-func (s *Store) GetRecentMessages() []MessageEntry {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if len(s.data.Messages) == 0 {
-		return nil
-	}
-	msgs := make([]MessageEntry, 0, len(s.data.Messages))
-	for _, m := range s.data.Messages {
-		msgs = append(msgs, m)
-	}
-	return msgs
 }
 
 func (s *Store) SaveKnownIdentities(known []*rns.KnownIdentity) error {

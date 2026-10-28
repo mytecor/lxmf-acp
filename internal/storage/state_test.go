@@ -113,49 +113,6 @@ func TestStoreIdentities(t *testing.T) {
 	}
 }
 
-func TestStoreMessages(t *testing.T) {
-	tmpDir := t.TempDir()
-	stateFile := filepath.Join(tmpDir, "state.json")
-
-	store, err := NewStore(stateFile)
-	if err != nil {
-		t.Fatalf("NewStore failed: %v", err)
-	}
-
-	m1 := MessageEntry{
-		ID:        "0123456789abcdef",
-		ChatKey:   "local:peer",
-		Role:      "assistant",
-		Content:   "Hello from assistant",
-		Timestamp: time.Now(),
-	}
-
-	if err := store.SaveMessage(m1); err != nil {
-		t.Fatalf("SaveMessage failed: %v", err)
-	}
-
-	got, ok := store.GetMessage(m1.ID)
-	if !ok || got.Content != m1.Content || got.Role != "assistant" {
-		t.Fatalf("GetMessage = %+v, %v; want %+v, true", got, ok, m1)
-	}
-
-	// Reload from disk
-	store2, err := NewStore(stateFile)
-	if err != nil {
-		t.Fatalf("Reload failed: %v", err)
-	}
-
-	got2, ok2 := store2.GetMessage(m1.ID)
-	if !ok2 || got2.Content != m1.Content {
-		t.Fatalf("Reload GetMessage = %+v, %v", got2, ok2)
-	}
-
-	recent := store2.GetRecentMessages()
-	if len(recent) != 1 || recent[0].ID != m1.ID {
-		t.Fatalf("GetRecentMessages = %+v; want 1 message", recent)
-	}
-}
-
 func TestStoreKnownIdentities(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateFile := filepath.Join(tmpDir, "state.json")

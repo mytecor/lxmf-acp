@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -20,12 +22,42 @@ func TestIdentityActivityPersistsAndMigratesOldState(t *testing.T) {
 	if err := s.SaveIdentity(IdentityRecord{Hash: "abandoned", CreatedAt: old}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveMessage(MessageEntry{ID: "message", ChatKey: "chat:owner", Timestamp: recent}); err != nil {
+	// Simulate a legacy state file containing message history.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy["messages"] = map[string]any{
+		"message": map[string]any{"chatKey": "chat:owner", "timestamp": recent, "content": "old private text"},
+	}
+	raw, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	s, err = NewStore(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var migrated map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &migrated); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := migrated["messages"]; ok {
+		t.Fatal("legacy messages remain on disk")
+	}
+	if _, err := NewStore(path); err != nil {
+		t.Fatalf("migrated state cannot be reloaded: %v", err)
 	}
 	rec, _ := s.GetIdentity("chat")
 	if !rec.LastActivityAt.Equal(recent) {

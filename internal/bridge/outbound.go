@@ -6,10 +6,8 @@ import (
 	"log"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/mytecor/lxmf-acp/internal/lxmf"
-	"github.com/mytecor/lxmf-acp/internal/storage"
 )
 
 const emptyReplyText = "(Empty response from agent)"
@@ -41,8 +39,6 @@ type replyStream struct {
 	title      string
 	replyTo    []byte
 	replyQuote string
-	history    *MessageHistory
-	store      *storage.Store
 	seg        *Segmenter
 
 	mu         sync.Mutex
@@ -56,7 +52,7 @@ type replyStream struct {
 	done chan struct{}
 }
 
-func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string, replyTo []byte, replyQuote string, history *MessageHistory, store *storage.Store, seg *Segmenter) *replyStream {
+func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string, replyTo []byte, replyQuote string, seg *Segmenter) *replyStream {
 	chatKey := hex.EncodeToString(localHash) + ":" + hex.EncodeToString(peerHash)
 	s := &replyStream{
 		client:     client,
@@ -66,8 +62,6 @@ func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string,
 		title:      title,
 		replyTo:    append([]byte(nil), replyTo...),
 		replyQuote: replyQuote,
-		history:    history,
-		store:      store,
 		seg:        seg,
 		done:       make(chan struct{}),
 	}
@@ -216,13 +210,11 @@ func (s *replyStream) run() {
 				hex.EncodeToString(s.peerHash), s.replyTo, s.replyQuote)
 		}
 		fields := lxmf.BuildMultipartFields(baseFields, prev, first && !p.final, status)
-		role := "assistant"
 		if p.notice {
 			fields = lxmf.WithRenderer(p.fields, lxmf.RendererPlain)
 			if len(s.replyTo) > 0 {
 				fields = lxmf.WithReplyTo(fields, s.replyTo, s.replyQuote)
 			}
-			role = "tool"
 		}
 
 		id, err := s.client.SendMessage(s.localHash, s.peerHash, lxmf.OutboundMessage{
@@ -239,20 +231,6 @@ func (s *replyStream) run() {
 				hex.EncodeToString(s.localHash), hex.EncodeToString(s.peerHash), err)
 			s.fail(err)
 			continue
-		}
-		if len(id) > 0 {
-			if s.history != nil {
-				s.history.Record(id, s.chatKey, role, p.content)
-			}
-			if s.store != nil {
-				_ = s.store.SaveMessage(storage.MessageEntry{
-					ID:        hex.EncodeToString(id),
-					ChatKey:   s.chatKey,
-					Role:      role,
-					Content:   p.content,
-					Timestamp: time.Now(),
-				})
-			}
 		}
 		if !p.notice {
 			prev = id

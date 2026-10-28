@@ -25,7 +25,7 @@ func reporterFixture(t *testing.T, mode string, interval time.Duration) (*toolRe
 		t.Fatal(err)
 	}
 	client := newMockLXMF(nil)
-	stream := newReplyStream(client, []byte("local"), []byte("peer"), "", nil, "", nil, store, NewSegmenter(0, 0))
+	stream := newReplyStream(client, []byte("local"), []byte("peer"), "", nil, "", NewSegmenter(0, 0))
 	if err := store.SetToolMode(stream.chatKey, mode); err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +79,7 @@ func TestToolBatchPartialMergeOrderingAndMetadata(t *testing.T) {
 	if !ok || record.Title != "Read config" || record.Input != "secret-input" || record.Content != "new result" {
 		t.Fatalf("partial merge failed: %+v", record)
 	}
-	history, _ := store.GetMessage(hex.EncodeToString(notice.ID))
-	if history.Role != "tool" {
-		t.Fatal("tool message recorded as assistant text")
-	}
+
 }
 
 func TestLongToolTickAndCompletionDoNotRepeatOrReopen(t *testing.T) {

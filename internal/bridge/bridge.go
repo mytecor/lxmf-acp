@@ -57,7 +57,6 @@ type Bridge struct {
 	sessions   *SessionManager
 	queue      *QueueManager
 	assembler  *Assembler
-	history    *MessageHistory
 
 	// Outbound part limits (zero selects the defaults).
 	maxPartUnits int
@@ -85,7 +84,6 @@ func NewBridge(cfg *config.Config, lxmfClient LXMFClient, acpClient ACPClient, s
 	b.sessions = NewSessionManager(store, acpClient)
 	b.queue = NewQueueManager(b)
 	b.assembler = NewAssembler(DefaultAssemblyTimeout)
-	b.history = NewMessageHistory(1000)
 
 	return b
 }
@@ -96,12 +94,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 		log.Printf("[Bridge] Warning: ACP agent connection failed initially (%v). Will retry on first message.", err)
 	}
 
-	// 2. Seed in-memory message history from persistent store
-	for _, rec := range b.store.GetRecentMessages() {
-		b.history.RecordHex(rec.ID, rec.ChatKey, rec.Role, rec.Content, rec.Timestamp)
-	}
-
-	// 3. Restore and register all stored identities
+	// 2. Restore and register all stored identities
 	allRecords := b.store.GetAllIdentities()
 	for _, rec := range allRecords {
 		if rec.PrivateKey == "" {
@@ -316,33 +309,10 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 	if err := b.store.TouchIdentity(localHex, now); err != nil {
 		log.Printf("[Bridge] Save chat activity: %v", err)
 	}
-	chatKey := localHex + ":" + senderHex
-
-	// Record raw part into memory history cache
-	if len(msg.MessageID) > 0 && msg.Content != "" && b.history != nil {
-		b.history.Record(msg.MessageID, chatKey, "user", msg.Content)
-	}
-
 	// Reassemble multipart chains; only complete prompts reach the queue.
 	ready := b.assembler.Process(msg)
 	if ready == nil {
 		return
-	}
-
-	// Record complete assembled message in history and persistent store
-	if len(ready.MessageID) > 0 && ready.Content != "" {
-		if b.history != nil {
-			b.history.Record(ready.MessageID, chatKey, "user", ready.Content)
-		}
-		if b.store != nil {
-			_ = b.store.SaveMessage(storage.MessageEntry{
-				ID:        hex.EncodeToString(ready.MessageID),
-				ChatKey:   chatKey,
-				Role:      "user",
-				Content:   ready.Content,
-				Timestamp: time.Now(),
-			})
-		}
 	}
 
 	b.queue.Enqueue(ready)
@@ -350,7 +320,7 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 
 // newReplyStream starts a streamed, possibly multipart, reply in a chat.
 func (b *Bridge) newReplyStream(localHash, peerHash []byte, title string, replyTo []byte, replyQuote string) *replyStream {
-	return newReplyStream(b.lxmfClient, localHash, peerHash, title, replyTo, replyQuote, b.history, b.store, NewSegmenter(b.maxPartUnits, b.maxPartBytes))
+	return newReplyStream(b.lxmfClient, localHash, peerHash, title, replyTo, replyQuote, NewSegmenter(b.maxPartUnits, b.maxPartBytes))
 }
 
 // formatPromptWithReply enriches prompt text with quoted context if msg is a reply to a previous message.
@@ -361,19 +331,7 @@ func (b *Bridge) formatPromptWithReply(msg *lxmf.InboundMessage, baseText string
 	}
 
 	replyIDHex := hex.EncodeToString(msg.ReplyTo)
-	var quoteText string
-	var role string
-
-	if len(msg.ReplyTo) > 0 && b.history != nil {
-		if entry, ok := b.history.Get(msg.ReplyTo); ok {
-			quoteText = entry.Content
-			role = entry.Role
-		}
-	}
-
-	if quoteText == "" && msg.ReplyQuote != "" {
-		quoteText = msg.ReplyQuote
-	}
+	quoteText := msg.ReplyQuote
 
 	quoteText = strings.ToValidUTF8(quoteText, "")
 
@@ -393,9 +351,6 @@ func (b *Bridge) formatPromptWithReply(msg *lxmf.InboundMessage, baseText string
 		}
 		blockQuote := strings.Join(lines, "\n")
 
-		if role != "" {
-			return fmt.Sprintf("[In reply to %s:\n%s]\n\n%s", role, blockQuote, baseText)
-		}
 		return fmt.Sprintf("[In reply to:\n%s]\n\n%s", blockQuote, baseText)
 	}
 
