@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -170,6 +171,23 @@ func (c *Client) LoadSession(ctx context.Context, sessionID string) error {
 }
 
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, error) {
+	var b strings.Builder
+	_, err := c.PromptStream(ctx, sessionID, text, func(chunk string) {
+		b.WriteString(chunk)
+	})
+	if err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// StopReasonCancelled is the ACP stop reason reported for a cancelled turn.
+const StopReasonCancelled = string(schema.StopReasonCancelled)
+
+// PromptStream sends a prompt and invokes onChunk with the text of every
+// agent_message_chunk as it arrives. It returns the turn's stop reason once
+// the turn has ended.
+func (c *Client) PromptStream(ctx context.Context, sessionID, text string, onChunk func(string)) (string, error) {
 	if err := c.EnsureConnected(ctx); err != nil {
 		return "", err
 	}
@@ -200,7 +218,15 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, er
 		return "", fmt.Errorf("prompt session %s: %w", sessionID, err)
 	}
 
-	reply, result, err := turn.Text()
+	for update := range turn.Updates() {
+		if chunk, ok := update.As[schema.SessionUpdateAgentMessageChunk](); ok {
+			if t, ok := acp1.TextOf(chunk.Content); ok && t != "" && onChunk != nil {
+				onChunk(t)
+			}
+		}
+	}
+
+	result, err := turn.Wait()
 	if err != nil {
 		if errors.Is(promptCtx.Err(), context.Canceled) {
 			return "", context.Canceled
@@ -208,11 +234,15 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, er
 		return "", fmt.Errorf("turn text: %w", err)
 	}
 
-	if result != nil && result.StopReason != "" {
-		log.Printf("[ACP] Turn completed for session %s (stop reason: %s)", sessionID, result.StopReason)
+	stopReason := ""
+	if result != nil {
+		stopReason = string(result.StopReason)
+	}
+	if stopReason != "" {
+		log.Printf("[ACP] Turn completed for session %s (stop reason: %s)", sessionID, stopReason)
 	}
 
-	return reply, nil
+	return stopReason, nil
 }
 
 func (c *Client) CancelPrompt(sessionID string) bool {

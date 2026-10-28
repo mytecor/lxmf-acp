@@ -20,6 +20,9 @@ type LXMFClient interface {
 	Close() error
 	SendFrom(localDestHash, recipientHash []byte, title, content string) error
 	Send(recipientHash []byte, title, content string) error
+	// SendMessage sends a message with LXMF fields and returns its hash once
+	// it is DELIVERED.
+	SendMessage(localDestHash, recipientHash []byte, msg lxmf.OutboundMessage) ([]byte, error)
 	RegisterIdentity(identity *rns.Identity) error
 	Hash() []byte
 	HexHash() string
@@ -32,7 +35,9 @@ type ACPClient interface {
 	CanLoadSession() bool
 	LoadSession(ctx context.Context, sessionID string) error
 	CreateSession(ctx context.Context) (string, error)
-	Prompt(ctx context.Context, sessionID, text string) (string, error)
+	// PromptStream streams agent_message_chunk text to onChunk and returns
+	// the turn's stop reason.
+	PromptStream(ctx context.Context, sessionID, text string, onChunk func(string)) (string, error)
 	CancelPrompt(sessionID string) bool
 }
 
@@ -43,6 +48,11 @@ type Bridge struct {
 	store      *storage.Store
 	sessions   *SessionManager
 	queue      *QueueManager
+	assembler  *Assembler
+
+	// Outbound part limits (zero selects the defaults).
+	maxPartUnits int
+	maxPartBytes int
 
 	// Rate limiter for /new command: userHex -> last creation time
 	rateMu      sync.Mutex
@@ -65,6 +75,7 @@ func NewBridge(cfg *config.Config, lxmfClient LXMFClient, acpClient ACPClient, s
 
 	b.sessions = NewSessionManager(store, acpClient)
 	b.queue = NewQueueManager(b)
+	b.assembler = NewAssembler(DefaultAssemblyTimeout)
 
 	return b
 }
@@ -120,6 +131,20 @@ func (b *Bridge) Start(ctx context.Context) error {
 		return fmt.Errorf("start lxmf client: %w", err)
 	}
 
+	// 6. Periodically discard incomplete inbound multipart chains
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.assembler.Sweep()
+			}
+		}
+	}()
+
 	return nil
 }
 
@@ -142,7 +167,18 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 		}
 	}
 
-	b.queue.Enqueue(msg)
+	// Reassemble multipart chains; only complete prompts reach the queue.
+	ready := b.assembler.Process(msg)
+	if ready == nil {
+		return
+	}
+
+	b.queue.Enqueue(ready)
+}
+
+// newReplyStream starts a streamed, possibly multipart, reply in a chat.
+func (b *Bridge) newReplyStream(localHash, peerHash []byte, title string) *replyStream {
+	return newReplyStream(b.lxmfClient, localHash, peerHash, title, NewSegmenter(b.maxPartUnits, b.maxPartBytes))
 }
 
 func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {

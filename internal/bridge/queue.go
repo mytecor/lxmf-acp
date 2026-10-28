@@ -13,6 +13,9 @@ import (
 	"github.com/mytecor/lxmf-acp/internal/lxmf"
 )
 
+// stopReasonCancelled is the ACP stop reason of a cancelled turn.
+const stopReasonCancelled = "cancelled"
+
 type peerQueue struct {
 	localHex  string
 	peerHex   string
@@ -122,24 +125,33 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	promptCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	reply, err := q.bridge.acpClient.Prompt(promptCtx, sessionID, text)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			log.Printf("[Bridge] Prompt cancelled for (%s, %s)", q.localHex, q.peerHex)
-			return
-		}
+	// A reassembled multipart prompt is passed verbatim (whitespace intact).
+	promptText := text
+	if msg.Multipart {
+		promptText = msg.Content
+	}
+
+	// The reply is streamed: parts are delivered while the agent is still
+	// generating. Waiting for the stream keeps replies of one chat ordered.
+	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "Reply")
+	stopReason, err := q.bridge.acpClient.PromptStream(promptCtx, sessionID, promptText, stream.Write)
+	switch {
+	case err == nil && stopReason == stopReasonCancelled:
+		log.Printf("[Bridge] Prompt cancelled for (%s, %s)", q.localHex, q.peerHex)
+		stream.Finish(lxmf.StatusCancelled, "", "")
+	case err == nil:
+		stream.Finish(lxmf.StatusCompleted, "", "")
+	case errors.Is(err, context.Canceled):
+		log.Printf("[Bridge] Prompt cancelled for (%s, %s)", q.localHex, q.peerHex)
+		stream.Finish(lxmf.StatusCancelled, "", "")
+	default:
 		log.Printf("[Bridge] Prompt error for (%s, %s) (session %s): %v", q.localHex, q.peerHex, sessionID, err)
-		_ = q.bridge.lxmfClient.SendFrom(q.localHash, q.peerHash, "Agent Error", fmt.Sprintf("Error from agent: %v", err))
+		stream.Finish(lxmf.StatusFailed, "Agent Error", fmt.Sprintf("Error from agent: %v", err))
+	}
+
+	if err := stream.Wait(); err != nil {
+		log.Printf("[Bridge] Error sending reply from %s to %s: %v", q.localHex, q.peerHex, err)
 		return
 	}
-
-	reply = strings.TrimSpace(reply)
-	if reply == "" {
-		reply = "(Empty response from agent)"
-	}
-
-	log.Printf("[Bridge] Sending agent reply from %s to %s (%d bytes)", q.localHex, q.peerHex, len(reply))
-	if err := q.bridge.lxmfClient.SendFrom(q.localHash, q.peerHash, "Reply", reply); err != nil {
-		log.Printf("[Bridge] Error sending reply from %s to %s: %v", q.localHex, q.peerHex, err)
-	}
+	log.Printf("[Bridge] Agent reply from %s to %s delivered", q.localHex, q.peerHex)
 }

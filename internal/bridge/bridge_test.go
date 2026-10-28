@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -22,6 +23,9 @@ type sentMsg struct {
 	To      []byte
 	Title   string
 	Content string
+	Fields  map[any]any
+	Direct  bool
+	ID      []byte
 }
 
 type mockLXMF struct {
@@ -32,6 +36,10 @@ type mockLXMF struct {
 	handler      lxmf.MessageHandler
 	failWelcome  bool
 	failLocalHex string
+	msgCounter   int
+	// sendHook, if set, runs before SendMessage records a message; it can
+	// block to simulate a pending delivery or return an error to fail it.
+	sendHook func(m sentMsg) error
 }
 
 func newMockLXMF(initialID *rns.Identity) *mockLXMF {
@@ -77,6 +85,34 @@ func (m *mockLXMF) SendFrom(localDestHash, recipientHash []byte, title, content 
 		Content: content,
 	})
 	return nil
+}
+
+func (m *mockLXMF) SendMessage(localDestHash, recipientHash []byte, out lxmf.OutboundMessage) ([]byte, error) {
+	m.mu.Lock()
+	m.msgCounter++
+	id := sha256.Sum256([]byte(fmt.Sprintf("msg-%d-%x", m.msgCounter, localDestHash)))
+	hook := m.sendHook
+	m.mu.Unlock()
+
+	msg := sentMsg{
+		From:    append([]byte(nil), localDestHash...),
+		To:      append([]byte(nil), recipientHash...),
+		Title:   out.Title,
+		Content: out.Content,
+		Fields:  out.Fields,
+		Direct:  out.Direct,
+		ID:      id[:],
+	}
+	if hook != nil {
+		if err := hook(msg); err != nil {
+			return nil, err
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sent = append(m.sent, msg)
+	return id[:], nil
 }
 
 func (m *mockLXMF) Send(recipientHash []byte, title, content string) error {
@@ -142,6 +178,8 @@ type mockACP struct {
 	loaded         []string
 	prompts        map[string][]string
 	supportLoad    bool
+	// streamFn, if set, replaces the default streaming behaviour.
+	streamFn func(ctx context.Context, sessionID, text string, onChunk func(string)) (string, error)
 }
 
 func newMockACP(supportLoad bool) *mockACP {
@@ -181,11 +219,26 @@ func (m *mockACP) CreateSession(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-func (m *mockACP) Prompt(ctx context.Context, sessionID, text string) (string, error) {
+func (m *mockACP) PromptStream(ctx context.Context, sessionID, text string, onChunk func(string)) (string, error) {
+	m.mu.Lock()
+	m.prompts[sessionID] = append(m.prompts[sessionID], text)
+	fn := m.streamFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, sessionID, text, onChunk)
+	}
+	onChunk("Agent reply: " + text)
+	return "end_turn", nil
+}
+
+func (m *mockACP) getPrompts() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.prompts[sessionID] = append(m.prompts[sessionID], text)
-	return "Agent reply: " + text, nil
+	var all []string
+	for _, p := range m.prompts {
+		all = append(all, p...)
+	}
+	return all
 }
 
 func (m *mockACP) CancelPrompt(sessionID string) bool {

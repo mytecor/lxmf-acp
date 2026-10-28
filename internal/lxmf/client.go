@@ -19,7 +19,31 @@ type InboundMessage struct {
 	MessageID  []byte
 	Title      string
 	Content    string
+	// Fields carries the decoded LXMF fields dictionary (may be nil).
+	Fields map[any]any
+	// Multipart is set by the bridge when Content is the reassembled text
+	// of a multipart LXMF chain rather than a single wire message.
+	Multipart bool
 }
+
+// OutboundMessage describes a single outbound LXMF message.
+type OutboundMessage struct {
+	Title   string
+	Content string
+	Fields  map[any]any
+	// Direct forces LXMF DIRECT delivery (over a Reticulum Link) instead of
+	// letting the library pick opportunistic delivery for small payloads.
+	// It never falls back to PROPAGATED.
+	Direct bool
+}
+
+// Direct-delivery retry policy. A packed message is retransmitted with the
+// exact same bytes, so its LXMF message hash stays stable across retries
+// and a duplicate arriving at the recipient is recognisable by hash.
+const (
+	directSendAttempts = 3
+	directRetryBackoff = 3 * time.Second
+)
 
 type MessageHandler func(msg *InboundMessage)
 
@@ -141,6 +165,7 @@ func (c *Client) registerDeliveryLocked(id *rns.Identity) error {
 				MessageID:  append([]byte(nil), m.MessageID()...),
 				Title:      string(m.Title),
 				Content:    string(m.Content),
+				Fields:     m.Fields,
 			}
 			handler(msg)
 		}
@@ -248,6 +273,95 @@ func (c *Client) SendFrom(localDestHash, recipientHash []byte, title, content st
 	}
 
 	return nil
+}
+
+// SendMessage sends an LXMF message (with optional fields) from the given
+// local destination and returns its LXMF message hash. It returns only after
+// the recipient's delivery proof has arrived (state DELIVERED); a message
+// that merely left the local interface (SENT) is not reported as success.
+func (c *Client) SendMessage(localDestHash, recipientHash []byte, m OutboundMessage) ([]byte, error) {
+	c.mu.RLock()
+	localHex := hex.EncodeToString(localDestHash)
+	delivery, ok := c.deliveries[localHex]
+	identity := c.identities[localHex]
+	transport := c.transport
+	c.mu.RUnlock()
+
+	if !ok || delivery == nil || identity == nil || transport == nil {
+		return nil, fmt.Errorf("delivery destination %s not found", localHex)
+	}
+
+	if !m.Direct {
+		msgID, err := delivery.SendWithID(recipientHash, []byte(m.Title), []byte(m.Content), m.Fields)
+		if err != nil {
+			if errors.Is(err, lxmf.ErrRecipientUnknown) {
+				_ = transport.RequestPath(recipientHash)
+			}
+			return nil, fmt.Errorf("send lxmf message: %w", err)
+		}
+		return msgID, nil
+	}
+
+	return c.sendDirect(delivery, identity, transport, localDestHash, recipientHash, m)
+}
+
+// sendDirect packs the message once in LXMF direct form and delivers it over
+// a Reticulum Link, waiting for the link-level proof (DELIVERED). Retries
+// reuse the same packed bytes, so the message hash is identical every time.
+func (c *Client) sendDirect(delivery *lxmf.Delivery, identity *rns.Identity, transport *rns.Transport, localDestHash, recipientHash []byte, m OutboundMessage) ([]byte, error) {
+	if len(recipientHash) != rns.IdentityHashLen {
+		return nil, fmt.Errorf("recipient dest_hash must be %d bytes", rns.IdentityHashLen)
+	}
+
+	var (
+		body    []byte
+		msgID   []byte
+		lastErr error
+	)
+	for attempt := 1; attempt <= directSendAttempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(directRetryBackoff * time.Duration(attempt-1))
+		}
+
+		if body == nil {
+			known := transport.Recall(recipientHash)
+			if known == nil {
+				_ = transport.RequestPath(recipientHash)
+				lastErr = fmt.Errorf("%w: %x", lxmf.ErrRecipientUnknown, recipientHash[:4])
+				continue
+			}
+
+			opts := lxmf.StampOptions{}
+			if !delivery.DisableOutboundStamps {
+				if cost, err := rns.DecodeLXMFAppDataStampCost(known.AppData); err == nil {
+					opts.Cost = cost
+				}
+				opts.MaxCost = delivery.MaxStampCost
+				if delivery.Tickets != nil {
+					opts.Ticket = delivery.Tickets.Held(recipientHash, time.Now())
+				}
+			}
+
+			var err error
+			body, msgID, err = lxmf.SignAndPackDirectStamped(identity, localDestHash, recipientHash,
+				[]byte(m.Title), []byte(m.Content), m.Fields, opts)
+			if err != nil {
+				return nil, fmt.Errorf("pack direct: %w", err)
+			}
+		}
+
+		timeout := delivery.LinkSendTimeout
+		if timeout <= 0 {
+			timeout = rns.DefaultLinkSendTimeout
+		}
+		if err := transport.SendOverLink(recipientHash, body, timeout); err != nil {
+			lastErr = fmt.Errorf("link send: %w", err)
+			log.Printf("[LXMF] Direct delivery attempt %d/%d to %x failed: %v", attempt, directSendAttempts, recipientHash, err)
+			continue
+		}
+		return msgID, nil
+	}
+	return nil, fmt.Errorf("direct lxmf delivery failed: %w", lastErr)
 }
 
 // Send sends an LXMF message originating from the initial identity.

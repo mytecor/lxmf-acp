@@ -25,6 +25,7 @@ Sideband / Columba
   - `/help` — Show the command help menu.
 - **Access Control**: Optional allowlist support for authorized LXMF destination hashes.
 - **Persistent State**: Persists private keys of generated identities, ownership records, and session mappings with atomic writes.
+- **Multipart LXMF Streaming**: Transparently handles arbitrary-length responses via standard `FIELD_CONTINUATION (0x42)` and namespaced `FIELD_CUSTOM_META (0xFD)`. Segments text into parts under 10 000 UTF-16 units without breaking unicode/whitespace. Delivers sequentially via `LXMF DIRECT` during generation and reassembles incoming multipart chains from peer instances before invoking ACP. Compatible with Sideband, Columba, and Ratspeak.
 
 ---
 

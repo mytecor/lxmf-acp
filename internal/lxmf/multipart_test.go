@@ -1,0 +1,148 @@
+package lxmf
+
+import (
+	"bytes"
+	"testing"
+
+	reticulumLxmf "github.com/thatSFguy/reticulum-go/lxmf"
+	"github.com/thatSFguy/reticulum-go/rns"
+)
+
+// roundTrip packs fields into a real signed LXMF direct body and parses it
+// back, so the test exercises the actual msgpack key/value types.
+func roundTrip(t *testing.T, content string, fields map[any]any) (*reticulumLxmf.Message, []byte) {
+	t.Helper()
+	sender, err := rns.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := rns.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := sender.DestinationHashFor(reticulumLxmf.FullName())
+	dst := recipient.DestinationHashFor(reticulumLxmf.FullName())
+
+	body, id, err := reticulumLxmf.SignAndPackDirect(sender, src, dst, []byte("Reply"), []byte(content), fields)
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	msg, err := reticulumLxmf.ParseDirectBody(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := msg.Verify(sender.PublicKey()[32:]); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !bytes.Equal(msg.MessageID(), id) {
+		t.Fatalf("message id mismatch")
+	}
+	return msg, id
+}
+
+func TestMultipartFieldsRoundTrip(t *testing.T) {
+	prev := bytes.Repeat([]byte{0xAB}, 32)
+
+	cases := []struct {
+		name   string
+		prev   []byte
+		more   bool
+		status Status
+	}{
+		{"first", nil, true, ""},
+		{"middle", prev, false, ""},
+		{"last", prev, false, StatusCompleted},
+		{"single", nil, false, StatusCompleted},
+		{"failed", prev, false, StatusFailed},
+		{"cancelled", nil, false, StatusCancelled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := BuildMultipartFields(nil, tc.prev, tc.more, tc.status)
+			msg, _ := roundTrip(t, "text stays untouched", fields)
+			if string(msg.Content) != "text stays untouched" {
+				t.Fatalf("content altered: %q", msg.Content)
+			}
+			info := ParseMultipartFields(msg.Fields)
+			if !bytes.Equal(info.Prev, tc.prev) || info.More != tc.more || info.Status != tc.status {
+				t.Fatalf("got %v, want prev=%x more=%v status=%q", info, tc.prev, tc.more, tc.status)
+			}
+			if !info.IsMultipart() {
+				t.Fatalf("expected multipart signalling")
+			}
+		})
+	}
+}
+
+func TestMultipartFieldsMinimalShape(t *testing.T) {
+	// Middle part: only FIELD_CONTINUATION, no custom meta.
+	f := BuildMultipartFields(nil, []byte{1, 2, 3}, false, "")
+	if len(f) != 1 {
+		t.Fatalf("middle part should carry exactly one field, got %v", f)
+	}
+	if _, ok := f[FieldContinuation]; !ok {
+		t.Fatalf("missing FIELD_CONTINUATION")
+	}
+	// Single-part reply: only status, no continuation, no more.
+	f = BuildMultipartFields(nil, nil, false, StatusCompleted)
+	ns := f[FieldCustomMeta].(map[any]any)[MetaNamespace].(map[any]any)
+	if len(f) != 1 || len(ns) != 1 || ns["status"] != "completed" {
+		t.Fatalf("unexpected single-part fields: %v", f)
+	}
+}
+
+func TestMultipartFieldsPreserveForeignMeta(t *testing.T) {
+	existing := map[any]any{
+		FieldCustomMeta: map[any]any{"other-app": "keep-me"},
+		0x30:            []byte("reply-to"),
+	}
+	f := BuildMultipartFields(existing, nil, true, "")
+	msg, _ := roundTrip(t, "x", f)
+
+	meta, ok := asMap(func() any {
+		for k, v := range msg.Fields {
+			if intKey(k) == FieldCustomMeta {
+				return v
+			}
+		}
+		return nil
+	}())
+	if !ok {
+		t.Fatalf("custom meta missing")
+	}
+	found := false
+	for k, v := range meta {
+		if s, _ := asString(k); s == "other-app" {
+			if vs, _ := asString(v); vs == "keep-me" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("foreign FIELD_CUSTOM_META entry was overwritten: %v", meta)
+	}
+	if !ParseMultipartFields(msg.Fields).More {
+		t.Fatalf("more flag lost")
+	}
+	// The caller's map must not be mutated.
+	if _, ok := existing[FieldCustomMeta].(map[any]any)[MetaNamespace]; ok {
+		t.Fatalf("existing fields map was mutated")
+	}
+}
+
+func TestParsePlainMessageHasNoMultipart(t *testing.T) {
+	msg, _ := roundTrip(t, "hello", nil)
+	if ParseMultipartFields(msg.Fields).IsMultipart() {
+		t.Fatalf("plain message detected as multipart")
+	}
+	// Unknown status values and foreign namespaces are ignored.
+	info := ParseMultipartFields(map[any]any{
+		FieldCustomMeta: map[any]any{
+			"someone-else": map[any]any{"status": "completed"},
+			MetaNamespace:  map[any]any{"status": "weird"},
+		},
+	})
+	if info.IsMultipart() {
+		t.Fatalf("unexpected multipart detection: %v", info)
+	}
+}
