@@ -123,24 +123,41 @@ func (b *Bridge) Start(ctx context.Context) error {
 		log.Printf("[Bridge] Restored dynamic identity: %s (owner: %s)", rec.Hash, rec.Owner)
 	}
 
-	// 3. Ensure initial identity is stored with public owner ("")
-	initHex := b.lxmfClient.HexHash()
-	if initHex != "" {
-		if _, found := b.store.GetIdentity(initHex); !found {
-			_ = b.store.SaveIdentity(storage.IdentityRecord{
-				Hash:      initHex,
-				Owner:     "",
-				CreatedAt: time.Now(),
-			})
+	// 3. Sync CLI allowlist into store allowlist if provided
+	if len(b.cfg.Allowlist) > 0 {
+		for _, a := range b.cfg.Allowlist {
+			_, _ = b.store.AddToAllowlist(a)
+		}
+		if b.store.GetAdmin() == "" {
+			_ = b.store.SetAdmin(b.cfg.Allowlist[0])
 		}
 	}
 
-	// 4. Register inbound message handler
+	// 4. Ensure initial identity is stored with owner
+	initHex := b.lxmfClient.HexHash()
+	if initHex != "" {
+		admin := b.store.GetAdmin()
+		if rec, found := b.store.GetIdentity(initHex); !found {
+			_ = b.store.SaveIdentity(storage.IdentityRecord{
+				Hash:      initHex,
+				Owner:     admin,
+				CreatedAt: time.Now(),
+			})
+		} else if rec.Owner == "" && admin != "" {
+			rec.Owner = admin
+			_ = b.store.SaveIdentity(rec)
+		} else if rec.Owner != "" && admin == "" {
+			_ = b.store.SetAdmin(rec.Owner)
+			_, _ = b.store.AddToAllowlist(rec.Owner)
+		}
+	}
+
+	// 5. Register inbound message handler
 	b.lxmfClient.SetMessageHandler(func(msg *lxmf.InboundMessage) {
 		b.handleInbound(msg)
 	})
 
-	// 5. Register announce handler to persist peer identities
+	// 6. Register announce handler to persist peer identities
 	b.lxmfClient.SetAnnounceHandler(func(a *rns.Announce) {
 		snapshot := b.lxmfClient.KnownSnapshot()
 		if len(snapshot) > 0 {
@@ -148,19 +165,19 @@ func (b *Bridge) Start(ctx context.Context) error {
 		}
 	})
 
-	// 6. Start LXMF client
+	// 7. Start LXMF client
 	if err := b.lxmfClient.Start(ctx); err != nil {
 		return fmt.Errorf("start lxmf client: %w", err)
 	}
 
-	// 7. Restore cached peer identities so restarting never drops incoming messages
+	// 8. Restore cached peer identities so restarting never drops incoming messages
 	storedKnown := b.store.GetKnownIdentities()
 	if len(storedKnown) > 0 {
 		b.lxmfClient.RestoreKnownIdentities(storedKnown)
 		log.Printf("[Bridge] Restored %d known peer identities to Reticulum cache", len(storedKnown))
 	}
 
-	// 8. Pin local destinations and chat owner destinations to protect against cache eviction
+	// 9. Pin local destinations, chat owner destinations, and allowlist destinations
 	var pinned [][]byte
 	if initHash := b.lxmfClient.Hash(); len(initHash) > 0 {
 		pinned = append(pinned, initHash)
@@ -176,11 +193,17 @@ func (b *Bridge) Start(ctx context.Context) error {
 			}
 		}
 	}
+	for _, a := range b.store.GetAllowlist() {
+		if o, err := hex.DecodeString(a); err == nil {
+			pinned = append(pinned, o)
+			_ = b.lxmfClient.RequestPath(o)
+		}
+	}
 	if len(pinned) > 0 {
 		b.lxmfClient.PinDestinations(pinned)
 	}
 
-	// 9. Periodically discard incomplete inbound multipart chains
+	// 10. Periodically discard incomplete inbound multipart chains
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -197,21 +220,58 @@ func (b *Bridge) Start(ctx context.Context) error {
 	return nil
 }
 
+func (b *Bridge) isAllowed(senderHex string) bool {
+	if !b.cfg.IsAllowed(senderHex) {
+		return false
+	}
+	return b.store.IsAllowed(senderHex)
+}
+
+func (b *Bridge) isAdmin(senderHex string) bool {
+	admin := b.store.GetAdmin()
+	if admin == "" {
+		initHex := b.lxmfClient.HexHash()
+		if initHex != "" {
+			if rec, found := b.store.GetIdentity(initHex); found && rec.Owner != "" {
+				admin = rec.Owner
+				_ = b.store.SetAdmin(admin)
+			}
+		}
+	}
+	return admin != "" && strings.EqualFold(admin, senderHex)
+}
+
 func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 	localHex := hex.EncodeToString(msg.LocalHash)
 	senderHex := hex.EncodeToString(msg.SenderHash)
 
 	// Check allowlist
-	if !b.cfg.IsAllowed(senderHex) {
+	if !b.isAllowed(senderHex) {
 		log.Printf("[Bridge] Rejected message from unallowed peer: %s", senderHex)
 		return
 	}
 
-	// Check identity ownership: dynamic identity must only accept messages from its owner
+	// Check identity ownership: chat must only accept messages from its owner
 	idRecord, found := b.store.GetIdentity(localHex)
-	if found && idRecord.Owner != "" {
-		if idRecord.Owner != senderHex {
+	if found {
+		if idRecord.Owner == "" {
+			// First user to message claims ownership & admin if unassigned
+			idRecord.Owner = senderHex
+			_ = b.store.SaveIdentity(idRecord)
+			if b.store.GetAdmin() == "" {
+				_ = b.store.SetAdmin(senderHex)
+			}
+			log.Printf("[Bridge] Chat %s claimed by owner: %s", localHex, senderHex)
+		} else if !strings.EqualFold(idRecord.Owner, senderHex) {
 			log.Printf("[Bridge] Rejected message for identity %s: sender %s is not the owner (%s)", localHex, senderHex, idRecord.Owner)
+			// Guide allowed user to their own personal chat or create one
+			userChats := b.store.GetIdentitiesForOwner(senderHex)
+			if len(userChats) > 0 {
+				notice := fmt.Sprintf("This chat belongs to another user. Please use your personal chat: `<%s>`", userChats[0].Hash)
+				_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", notice)
+			} else {
+				_, _ = b.createDedicatedChatFor(msg.SenderHash, senderHex, msg.LocalHash)
+			}
 			return
 		}
 	}
@@ -249,12 +309,13 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 }
 
 // newReplyStream starts a streamed, possibly multipart, reply in a chat.
-func (b *Bridge) newReplyStream(localHash, peerHash []byte, title string, replyTo []byte) *replyStream {
-	return newReplyStream(b.lxmfClient, localHash, peerHash, title, replyTo, b.history, b.store, NewSegmenter(b.maxPartUnits, b.maxPartBytes))
+func (b *Bridge) newReplyStream(localHash, peerHash []byte, title string, replyTo []byte, replyQuote string) *replyStream {
+	return newReplyStream(b.lxmfClient, localHash, peerHash, title, replyTo, replyQuote, b.history, b.store, NewSegmenter(b.maxPartUnits, b.maxPartBytes))
 }
 
 // formatPromptWithReply enriches prompt text with quoted context if msg is a reply to a previous message.
 func (b *Bridge) formatPromptWithReply(msg *lxmf.InboundMessage, baseText string) string {
+	baseText = strings.ToValidUTF8(baseText, "")
 	if len(msg.ReplyTo) == 0 && msg.ReplyQuote == "" {
 		return baseText
 	}
@@ -274,14 +335,17 @@ func (b *Bridge) formatPromptWithReply(msg *lxmf.InboundMessage, baseText string
 		quoteText = msg.ReplyQuote
 	}
 
+	quoteText = strings.ToValidUTF8(quoteText, "")
+
 	if quoteText == "" && replyIDHex != "" {
 		return fmt.Sprintf("[In reply to message <%s>]\n\n%s", replyIDHex, baseText)
 	}
 
 	if quoteText != "" {
+		quotedRunes := []rune(quoteText)
 		quoted := quoteText
-		if len(quoted) > 500 {
-			quoted = quoted[:497] + "..."
+		if len(quotedRunes) > 500 {
+			quoted = string(quotedRunes[:497]) + "..."
 		}
 		lines := strings.Split(quoted, "\n")
 		for i, l := range lines {
@@ -402,6 +466,150 @@ func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
 		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "New Chat Info", errMsg)
 		return
 	}
+}
+
+func (b *Bridge) createDedicatedChatFor(targetHash []byte, targetHex string, notifyLocalHash []byte) (string, error) {
+	// 1. Generate new LXMF identity
+	newID, err := rns.NewIdentity()
+	if err != nil {
+		return "", fmt.Errorf("generate identity: %w", err)
+	}
+
+	newDestHash := newID.DestinationHashFor(reticulumLxmf.FullName())
+	newDestHex := hex.EncodeToString(newDestHash)
+
+	// 2. Persist identity
+	record := storage.IdentityRecord{
+		Hash:       newDestHex,
+		PrivateKey: hex.EncodeToString(newID.PrivateKey()),
+		Owner:      targetHex,
+		CreatedAt:  time.Now(),
+	}
+	if err := b.store.SaveIdentity(record); err != nil {
+		return "", fmt.Errorf("save identity: %w", err)
+	}
+
+	// 3. Register destination
+	if err := b.lxmfClient.RegisterIdentity(newID); err != nil {
+		return "", fmt.Errorf("register identity: %w", err)
+	}
+
+	// 4. Pin destinations and request path
+	b.lxmfClient.PinDestinations([][]byte{newDestHash, targetHash})
+	_ = b.lxmfClient.RequestPath(targetHash)
+
+	// 5. Send welcome greeting from new identity directly to target
+	welcomeContent := fmt.Sprintf("Started a new conversation with **%s**.\n\nSend a message to begin.", b.cfg.DisplayName)
+	err = b.lxmfClient.SendFrom(newDestHash, targetHash, "", welcomeContent)
+	if err != nil {
+		log.Printf("[Bridge] Warning: failed to deliver welcome message from %s to %s: %v", newDestHex, targetHex, err)
+	}
+
+	// 6. Optional notification in the local chat where message was originally received
+	if len(notifyLocalHash) > 0 {
+		notice := fmt.Sprintf("This chat belongs to another user. Your personal chat has been created: `<%s>`. Please message there.", newDestHex)
+		_ = b.lxmfClient.SendFrom(notifyLocalHash, targetHash, "", notice)
+	}
+
+	return newDestHex, nil
+}
+
+func (b *Bridge) handleAllowCommand(msg *lxmf.InboundMessage) {
+	senderHex := hex.EncodeToString(msg.SenderHash)
+	if !b.isAdmin(senderHex) {
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Permission denied: administrative commands are only available to the agent administrator.")
+		return
+	}
+
+	parts := strings.Fields(msg.Content)
+	if len(parts) < 2 {
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Usage: `/allow <destination_hash>`")
+		return
+	}
+
+	targetHex := strings.ToLower(strings.Trim(parts[1], "<> \t\r\n"))
+	targetBytes, err := hex.DecodeString(targetHex)
+	if err != nil || len(targetBytes) != 16 {
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Invalid destination hash. Expected 32 hexadecimal characters (16 bytes).")
+		return
+	}
+
+	added, err := b.store.AddToAllowlist(targetHex)
+	if err != nil {
+		log.Printf("[Bridge] Failed to add %s to allowlist: %v", targetHex, err)
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Failed to update whitelist.")
+		return
+	}
+
+	newDestHex, err := b.createDedicatedChatFor(targetBytes, targetHex, nil)
+	if err != nil {
+		log.Printf("[Bridge] Failed to create dedicated chat for %s: %v", targetHex, err)
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", fmt.Sprintf("Added `<%s>` to whitelist, but failed to create personal chat: %v", targetHex, err))
+		return
+	}
+
+	status := "Added"
+	if !added {
+		status = "Already in whitelist;"
+	}
+	confirm := fmt.Sprintf("%s user `<%s>` to whitelist.\n\nCreated dedicated chat and sent greeting from: `<%s>`", status, targetHex, newDestHex)
+	_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", confirm)
+}
+
+func (b *Bridge) handleRevokeCommand(msg *lxmf.InboundMessage) {
+	senderHex := hex.EncodeToString(msg.SenderHash)
+	if !b.isAdmin(senderHex) {
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Permission denied: administrative commands are only available to the agent administrator.")
+		return
+	}
+
+	parts := strings.Fields(msg.Content)
+	if len(parts) < 2 {
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Usage: `/revoke <destination_hash>`")
+		return
+	}
+
+	targetHex := strings.ToLower(strings.Trim(parts[1], "<> \t\r\n"))
+	removed, err := b.store.RemoveFromAllowlist(targetHex)
+	if err != nil {
+		log.Printf("[Bridge] Failed to remove %s from allowlist: %v", targetHex, err)
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Failed to update whitelist.")
+		return
+	}
+
+	if !removed {
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", fmt.Sprintf("User `<%s>` was not found in whitelist.", targetHex))
+		return
+	}
+
+	_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", fmt.Sprintf("User `<%s>` removed from whitelist.", targetHex))
+}
+
+func (b *Bridge) handleWhitelistCommand(msg *lxmf.InboundMessage) {
+	senderHex := hex.EncodeToString(msg.SenderHash)
+	if !b.isAdmin(senderHex) {
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Permission denied: administrative commands are only available to the agent administrator.")
+		return
+	}
+
+	list := b.store.GetAllowlist()
+	if len(list) == 0 {
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Whitelist is empty (public access).")
+		return
+	}
+
+	admin := b.store.GetAdmin()
+	var bld strings.Builder
+	bld.WriteString(fmt.Sprintf("**Whitelist (%d users):**\n\n", len(list)))
+	for _, h := range list {
+		if strings.EqualFold(h, admin) {
+			bld.WriteString(fmt.Sprintf("- `<%s>` *(Admin)*\n", h))
+		} else {
+			bld.WriteString(fmt.Sprintf("- `<%s>`\n", h))
+		}
+	}
+
+	_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", bld.String())
 }
 
 func (b *Bridge) Close() error {

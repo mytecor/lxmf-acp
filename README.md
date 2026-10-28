@@ -17,13 +17,16 @@ Sideband / Columba
 - **Fully Native Go Stack**: Built with `thatSFguy/reticulum-go` (pure Go without CGo) and `ironpark/acp-go` (official ACP v1 protocol).
 - **Reticulum Compatibility**: Connects to an existing `rnsd` instance via TCP shared instance (`127.0.0.1:37428`), automatically reconnecting on daemon restart.
 - **Dynamic LXMF Identities**: Create independent chats via the `/new` command without parent/child hierarchies. All identities operate as peers over a single RNS connection.
-- **Session Model**: Context isolation keyed by `(local_lxmf_destination, remote_lxmf_destination) ↔ sessionId`. New identities only accept messages from their creator; different chats of the same user never share ACP context.
+- **Unified Chat Model & Author Isolation**: Every chat (both root and dynamic) has a single author (`Owner`); only the author can send messages to that chat. The initial chat belongs to the administrator, and invited users receive their own private chats.
 - **Message Queue**: Sequential per-dialogue message processing preventing race conditions and conflicting requests.
 - **Built-in Chat Commands**:
   - `/new` — Spawn a new independent dialogue with a new LXMF identity (sends a welcome message from the newly generated address).
   - `/cancel` — Cancel active generation for the current session.
   - `/help` — Show the command help menu.
-- **Access Control**: Optional allowlist support for authorized LXMF destination hashes.
+  - `/allow <hash>` — *(Admin only)* Add a user to the persistent whitelist, automatically create a dedicated personal chat identity for them, and proactively send a welcome message directly to the user.
+  - `/revoke <hash>` — *(Admin only)* Remove a user from the whitelist.
+  - `/whitelist` — *(Admin only)* Display currently whitelisted destination hashes and the administrator.
+- **Access Control & Dynamic Whitelist**: Persistent whitelist stored in `state.json` with CLI `--allowlist` seeding. Unauthorized users are blocked, and when an admin adds a user, the bot initiates the conversation directly.
 - **Persistent State**: Persists private keys of generated identities, ownership records, and session mappings with atomic writes.
 - **Multipart LXMF Streaming**: Transparently handles arbitrary-length responses via standard `FIELD_CONTINUATION (0x42)` and namespaced `FIELD_CUSTOM_META (0xFD)`. Segments text into parts under 10 000 UTF-16 units without breaking unicode/whitespace. Delivers sequentially via `LXMF DIRECT` during generation and reassembles incoming multipart chains from peer instances before invoking ACP. Compatible with Sideband, Columba, and Ratspeak.
 - **Markdown Rendering**: Sets LXMF `FIELD_RENDERER (0x0F)` to `RENDERER_MARKDOWN (0x02)` across all agent responses, notifications, and commands. Compatible clients (such as Columba, Sideband, and MeshChat) render formatted markdown, lists, code blocks, and emphasis natively.
@@ -64,6 +67,7 @@ go build -o lxmf-acp ./cmd/lxmf-acp
 | `--allowlist` | `LXMF_ACP_ALLOWLIST` | *(empty)* | Comma-separated list of allowed LXMF destination hashes (empty allows all) |
 | `--max-user-identities` | `LXMF_ACP_MAX_USER_IDENTITIES` | `20` | Maximum dynamic identities allowed per user (0 for unlimited) |
 | `--new-chat-cooldown` | `LXMF_ACP_NEW_CHAT_COOLDOWN` | `5` | Minimum cooldown in seconds between `/new` commands per user |
+| `--outbound-replies` | `LXMF_ACP_OUTBOUND_REPLIES` | `true` | Include reply-to and quote metadata when responding to user replies |
 
 ---
 

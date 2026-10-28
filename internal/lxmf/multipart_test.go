@@ -269,3 +269,23 @@ func TestReplyFields(t *testing.T) {
 		t.Fatalf("expected IsReply() == false for normal message")
 	}
 }
+
+func TestMakeQuoteSnippet(t *testing.T) {
+	cases := []struct {
+		input  string
+		maxLen int
+		want   string
+	}{
+		{"", 50, ""},
+		{"   ", 50, ""},
+		{"видишь реплай?", 50, "видишь реплай?"},
+		{"Line 1\nLine 2\n\nLine 3", 50, "Line 1 Line 2 Line 3"},
+		{"This is a very long text that exceeds the limit specified for testing", 20, "This is a very lo..."},
+	}
+	for _, tc := range cases {
+		got := MakeQuoteSnippet(tc.input, tc.maxLen)
+		if got != tc.want {
+			t.Errorf("MakeQuoteSnippet(%q, %d) = %q, want %q", tc.input, tc.maxLen, got, tc.want)
+		}
+	}
+}

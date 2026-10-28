@@ -16,6 +16,7 @@ type Config struct {
 	Allowlist            []string
 	MaxIdentitiesPerUser int
 	NewChatCooldownSec   int
+	OutboundReplies      bool
 }
 
 func Parse() *Config {
@@ -28,6 +29,7 @@ func Parse() *Config {
 	flag.StringVar(&cfg.DisplayName, "name", "LXMF Agent", "Display name announced in LXMF")
 	flag.IntVar(&cfg.MaxIdentitiesPerUser, "max-user-identities", 20, "Maximum number of chats/identities allowed per user (0 for unlimited)")
 	flag.IntVar(&cfg.NewChatCooldownSec, "new-chat-cooldown", 5, "Minimum cooldown in seconds between /new commands per user")
+	flag.BoolVar(&cfg.OutboundReplies, "outbound-replies", true, "Include reply-to and quote metadata when responding to user replies")
 
 	var allowlistStr string
 	flag.StringVar(&allowlistStr, "allowlist", "", "Comma-separated list of allowed peer destination hashes (empty allows all)")
@@ -61,6 +63,11 @@ func Parse() *Config {
 	if env := os.Getenv("LXMF_ACP_NEW_CHAT_COOLDOWN"); env != "" && cfg.NewChatCooldownSec == 5 {
 		if val, err := strconv.Atoi(env); err == nil {
 			cfg.NewChatCooldownSec = val
+		}
+	}
+	if env := os.Getenv("LXMF_ACP_OUTBOUND_REPLIES"); env != "" && cfg.OutboundReplies {
+		if val, err := strconv.ParseBool(env); err == nil {
+			cfg.OutboundReplies = val
 		}
 	}
 

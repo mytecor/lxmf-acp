@@ -195,3 +195,81 @@ func TestStoreKnownIdentities(t *testing.T) {
 		t.Fatalf("PublicKey mismatch: got %x, want %x", known[0].PublicKey, pubKey)
 	}
 }
+
+func TestStoreAllowlistAndAdmin(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateFile := filepath.Join(tmpDir, "state.json")
+
+	store, err := NewStore(stateFile)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	// Initially empty
+	if store.GetAdmin() != "" {
+		t.Errorf("expected empty admin initially, got %q", store.GetAdmin())
+	}
+	if len(store.GetAllowlist()) != 0 {
+		t.Errorf("expected empty allowlist initially, got %v", store.GetAllowlist())
+	}
+	// When empty, IsAllowed should be true
+	if !store.IsAllowed("any_hash_123") {
+		t.Errorf("expected IsAllowed=true when allowlist is empty")
+	}
+
+	// Set admin
+	adminHex := "admin_dest_11223344556677889900"
+	if err := store.SetAdmin(adminHex); err != nil {
+		t.Fatalf("SetAdmin failed: %v", err)
+	}
+	if store.GetAdmin() != adminHex {
+		t.Errorf("GetAdmin = %q, want %q", store.GetAdmin(), adminHex)
+	}
+
+	// Add to allowlist
+	added, err := store.AddToAllowlist(adminHex)
+	if err != nil || !added {
+		t.Fatalf("AddToAllowlist failed: added=%v, err=%v", added, err)
+	}
+	added2, _ := store.AddToAllowlist(adminHex)
+	if added2 {
+		t.Errorf("expected duplicate AddToAllowlist to return false")
+	}
+
+	userHex := "user_dest_99887766554433221100"
+	_, _ = store.AddToAllowlist(userHex)
+
+	if !store.IsAllowed(adminHex) {
+		t.Errorf("expected adminHex to be allowed")
+	}
+	if !store.IsAllowed(userHex) {
+		t.Errorf("expected userHex to be allowed")
+	}
+	if store.IsAllowed("unauthorized_peer_000000000000") {
+		t.Errorf("expected unauthorized peer to be rejected")
+	}
+
+	// Reload from disk and verify persistence
+	store2, err := NewStore(stateFile)
+	if err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+	if store2.GetAdmin() != adminHex {
+		t.Errorf("Reloaded admin = %q, want %q", store2.GetAdmin(), adminHex)
+	}
+	if len(store2.GetAllowlist()) != 2 {
+		t.Errorf("Reloaded allowlist len = %d, want 2", len(store2.GetAllowlist()))
+	}
+	if !store2.IsAllowed(userHex) {
+		t.Errorf("Reloaded store should allow userHex")
+	}
+
+	// Remove from allowlist
+	removed, err := store2.RemoveFromAllowlist(userHex)
+	if err != nil || !removed {
+		t.Fatalf("RemoveFromAllowlist failed: removed=%v, err=%v", removed, err)
+	}
+	if store2.IsAllowed(userHex) {
+		t.Errorf("expected userHex to not be allowed after removal")
+	}
+}

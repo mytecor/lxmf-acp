@@ -32,15 +32,16 @@ type outPart struct {
 //
 // There is deliberately no backpressure towards ACP: Write never blocks.
 type replyStream struct {
-	client    LXMFClient
-	localHash []byte
-	peerHash  []byte
-	chatKey   string
-	title     string
-	replyTo   []byte
-	history   *MessageHistory
-	store     *storage.Store
-	seg       *Segmenter
+	client     LXMFClient
+	localHash  []byte
+	peerHash   []byte
+	chatKey    string
+	title      string
+	replyTo    []byte
+	replyQuote string
+	history    *MessageHistory
+	store      *storage.Store
+	seg        *Segmenter
 
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -52,19 +53,20 @@ type replyStream struct {
 	done chan struct{}
 }
 
-func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string, replyTo []byte, history *MessageHistory, store *storage.Store, seg *Segmenter) *replyStream {
+func newReplyStream(client LXMFClient, localHash, peerHash []byte, title string, replyTo []byte, replyQuote string, history *MessageHistory, store *storage.Store, seg *Segmenter) *replyStream {
 	chatKey := hex.EncodeToString(localHash) + ":" + hex.EncodeToString(peerHash)
 	s := &replyStream{
-		client:    client,
-		localHash: append([]byte(nil), localHash...),
-		peerHash:  append([]byte(nil), peerHash...),
-		chatKey:   chatKey,
-		title:     title,
-		replyTo:   append([]byte(nil), replyTo...),
-		history:   history,
-		store:     store,
-		seg:       seg,
-		done:      make(chan struct{}),
+		client:     client,
+		localHash:  append([]byte(nil), localHash...),
+		peerHash:   append([]byte(nil), peerHash...),
+		chatKey:    chatKey,
+		title:      title,
+		replyTo:    append([]byte(nil), replyTo...),
+		replyQuote: replyQuote,
+		history:    history,
+		store:      store,
+		seg:        seg,
+		done:       make(chan struct{}),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	go s.run()
@@ -181,8 +183,11 @@ func (s *replyStream) run() {
 			status = p.status
 		}
 		baseFields := map[any]any{lxmf.FieldRenderer: lxmf.RendererMarkdown}
-		if first && len(s.replyTo) > 0 {
+		if first && len(s.replyTo) > 0 && s.replyQuote != "" {
 			baseFields[lxmf.FieldReplyTo] = s.replyTo
+			baseFields[lxmf.FieldReplyQuote] = s.replyQuote
+			log.Printf("[Bridge] Attaching reply metadata for %s: replyTo=%x, replyQuote=%q",
+				hex.EncodeToString(s.peerHash), s.replyTo, s.replyQuote)
 		}
 		fields := lxmf.BuildMultipartFields(baseFields, prev, first && !p.final, status)
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,8 @@ type MessageEntry struct {
 }
 
 type State struct {
+	Admin           string                        `json:"admin,omitempty"`
+	Allowlist       []string                      `json:"allowlist,omitempty"`
 	Identities      map[string]IdentityRecord     `json:"identities"`
 	Sessions        map[string]SessionEntry       `json:"sessions"`
 	Messages        map[string]MessageEntry       `json:"messages,omitempty"`
@@ -235,11 +238,102 @@ func (s *Store) CountIdentitiesForOwner(ownerHex string) int {
 
 	count := 0
 	for _, entry := range s.data.Identities {
-		if entry.Owner == ownerHex {
+		if entry.PrivateKey != "" && strings.EqualFold(entry.Owner, ownerHex) {
 			count++
 		}
 	}
 	return count
+}
+
+func (s *Store) GetIdentitiesForOwner(ownerHex string) []IdentityRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var res []IdentityRecord
+	for _, entry := range s.data.Identities {
+		if strings.EqualFold(entry.Owner, ownerHex) {
+			res = append(res, entry)
+		}
+	}
+	return res
+}
+
+func (s *Store) GetAdmin() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data.Admin
+}
+
+func (s *Store) SetAdmin(adminHex string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Admin = strings.ToLower(adminHex)
+	return s.saveLocked()
+}
+
+func (s *Store) GetAllowlist() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	res := make([]string, len(s.data.Allowlist))
+	copy(res, s.data.Allowlist)
+	return res
+}
+
+func (s *Store) AddToAllowlist(peerHex string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clean := strings.ToLower(peerHex)
+
+	// If allowlist was empty and admin is set, ensure admin is also included in allowlist
+	if len(s.data.Allowlist) == 0 && s.data.Admin != "" && !strings.EqualFold(s.data.Admin, clean) {
+		s.data.Allowlist = append(s.data.Allowlist, strings.ToLower(s.data.Admin))
+	}
+
+	for _, a := range s.data.Allowlist {
+		if strings.EqualFold(a, clean) {
+			return false, nil
+		}
+	}
+	s.data.Allowlist = append(s.data.Allowlist, clean)
+	return true, s.saveLocked()
+}
+
+func (s *Store) RemoveFromAllowlist(peerHex string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.Admin != "" && strings.EqualFold(peerHex, s.data.Admin) {
+		return false, fmt.Errorf("cannot remove administrator from allowlist")
+	}
+
+	idx := -1
+	for i, a := range s.data.Allowlist {
+		if strings.EqualFold(a, peerHex) {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return false, nil
+	}
+	s.data.Allowlist = append(s.data.Allowlist[:idx], s.data.Allowlist[idx+1:]...)
+	return true, s.saveLocked()
+}
+
+func (s *Store) IsAllowed(peerHex string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.data.Allowlist) == 0 {
+		return true
+	}
+	if s.data.Admin != "" && strings.EqualFold(s.data.Admin, peerHex) {
+		return true
+	}
+	for _, a := range s.data.Allowlist {
+		if strings.EqualFold(a, peerHex) {
+			return true
+		}
+	}
+	return false
 }
 
 const maxStoredMessages = 200

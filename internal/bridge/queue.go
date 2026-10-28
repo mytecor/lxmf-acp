@@ -81,7 +81,8 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	}
 
 	ctx := context.Background()
-	log.Printf("[Queue] Processing message for %s from %s: %q", q.localHex, q.peerHex, text)
+	log.Printf("[Queue] Processing message for %s from %s (id: %x, isReply: %v, replyTo: %x, replyQuote: %q): %q",
+		q.localHex, q.peerHex, msg.MessageID, msg.IsReply(), msg.ReplyTo, msg.ReplyQuote, text)
 
 	// Command: /help
 	if text == "/help" {
@@ -89,6 +90,12 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 			"- `/new` — Start a new chat with a fresh conversation session\n" +
 			"- `/cancel` — Cancel current generation\n" +
 			"- `/help` — Show this message"
+		if q.bridge.isAdmin(q.peerHex) {
+			reply += "\n\n**Admin commands:**\n" +
+				"- `/allow <hash>` — Add user to whitelist and open a personal chat with them\n" +
+				"- `/revoke <hash>` — Remove user from whitelist\n" +
+				"- `/whitelist` — Show whitelisted users"
+		}
 		_ = q.bridge.lxmfClient.SendFrom(q.localHash, q.peerHash, "Help", reply)
 		return
 	}
@@ -96,6 +103,24 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 	// Command: /new
 	if text == "/new" {
 		q.bridge.handleNewCommand(msg)
+		return
+	}
+
+	// Command: /allow
+	if strings.HasPrefix(text, "/allow") {
+		q.bridge.handleAllowCommand(msg)
+		return
+	}
+
+	// Command: /revoke
+	if strings.HasPrefix(text, "/revoke") {
+		q.bridge.handleRevokeCommand(msg)
+		return
+	}
+
+	// Command: /whitelist or /allowlist
+	if text == "/whitelist" || text == "/allowlist" {
+		q.bridge.handleWhitelistCommand(msg)
 		return
 	}
 
@@ -133,14 +158,17 @@ func (q *peerQueue) processMessage(msg *lxmf.InboundMessage) {
 
 	// Enrich prompt with reply quote context if message is a reply
 	promptText = q.bridge.formatPromptWithReply(msg, promptText)
+	promptText = strings.ToValidUTF8(promptText, "")
 
 	// The reply is streamed: parts are delivered while the agent is still
 	// generating. Waiting for the stream keeps replies of one chat ordered.
 	var replyToID []byte
-	if msg.IsReply() {
+	var replyQuote string
+	if q.bridge.cfg.OutboundReplies && len(msg.MessageID) > 0 && msg.Content != "" {
 		replyToID = msg.MessageID
+		replyQuote = lxmf.MakeQuoteSnippet(msg.Content, 120)
 	}
-	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "", replyToID)
+	stream := q.bridge.newReplyStream(q.localHash, q.peerHash, "", replyToID, replyQuote)
 	stopReason, err := q.bridge.acpClient.PromptStream(promptCtx, sessionID, promptText, stream.Write)
 	switch {
 	case err == nil && stopReason == stopReasonCancelled:

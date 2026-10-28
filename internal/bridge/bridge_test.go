@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mytecor/lxmf-acp/internal/config"
 	"github.com/mytecor/lxmf-acp/internal/lxmf"
@@ -942,8 +945,9 @@ func TestReplyHandling(t *testing.T) {
 	userHex := hex.EncodeToString(userHash)
 
 	cfg := &config.Config{
-		DisplayName: "TestAgent",
-		Allowlist:   []string{userHex},
+		DisplayName:     "TestAgent",
+		Allowlist:       []string{userHex},
+		OutboundReplies: true,
 	}
 
 	b := NewBridge(cfg, mockL, mockA, store)
@@ -968,9 +972,13 @@ func TestReplyHandling(t *testing.T) {
 		t.Fatalf("expected agent response, got none")
 	}
 	firstAgentReply := sent[len(sent)-1]
-	// Normal message reply should NOT have FieldReplyTo
-	if _, hasReplyTo := firstAgentReply.Fields[lxmf.FieldReplyTo]; hasReplyTo {
-		t.Errorf("normal response should not carry FieldReplyTo, got %v", firstAgentReply.Fields[lxmf.FieldReplyTo])
+	// OutboundReplies attaches reply metadata to user prompts
+	rep1, ok1 := firstAgentReply.Fields[lxmf.FieldReplyTo].([]byte)
+	if !ok1 || !bytes.Equal(rep1, m1ID) {
+		t.Errorf("expected response to carry FieldReplyTo=%x, got %x", m1ID, rep1)
+	}
+	if firstAgentReply.Fields[lxmf.FieldReplyQuote] != "Hello agent" {
+		t.Errorf("expected response to carry FieldReplyQuote=%q, got %q", "Hello agent", firstAgentReply.Fields[lxmf.FieldReplyQuote])
 	}
 
 	// 2. User replies to the assistant's previous message
@@ -1002,12 +1010,16 @@ func TestReplyHandling(t *testing.T) {
 		t.Errorf("expected user reply text in prompt, got %q", p2)
 	}
 
-	// The agent's response to a reply message SHOULD carry FieldReplyTo pointing to m2ID
+	// The agent's response to a reply message SHOULD carry FieldReplyTo pointing to m2ID and FieldReplyQuote
 	sent = mockL.getSent()
 	secondAgentReply := sent[len(sent)-1]
 	repField, ok := secondAgentReply.Fields[lxmf.FieldReplyTo].([]byte)
 	if !ok || !bytes.Equal(repField, m2ID) {
 		t.Errorf("expected response to carry FieldReplyTo=%x, got %x (ok=%v)", m2ID, repField, ok)
+	}
+	quoteField, ok := secondAgentReply.Fields[lxmf.FieldReplyQuote].(string)
+	if !ok || quoteField != "Option A please" {
+		t.Errorf("expected response to carry FieldReplyQuote=%q, got %q (ok=%v)", "Option A please", quoteField, ok)
 	}
 
 	// 3. User replies with FieldReplyQuote when target message is not in cache
@@ -1033,5 +1045,220 @@ func TestReplyHandling(t *testing.T) {
 	}
 	if !containsStr(p3, "I agree with that quote") {
 		t.Errorf("expected user text in prompt, got %q", p3)
+	}
+
+	// 4. User replies to a long Cyrillic/Russian text with special symbols (> 500 runes)
+	// Must not produce invalid UTF-8 by slicing mid-codepoint.
+	longCyrillic := strings.Repeat("Да, вижу реплай! Тестируем длинный текст с русскими буквами. 🛠️ ", 20)
+	longID := []byte("long-msg-id-1")
+	b.history.Record(longID, hex.EncodeToString(initialHash)+":"+userHex, "assistant", longCyrillic)
+
+	m4ID := []byte("user-msg-4")
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: userHash,
+		MessageID:  m4ID,
+		Title:      "Reply to long Russian",
+		Content:    "а сейчас?",
+		Fields: map[any]any{
+			lxmf.FieldReplyTo: longID,
+		},
+	})
+	time.Sleep(150 * time.Millisecond)
+
+	prompts = mockA.getPrompts()
+	p4 := prompts[len(prompts)-1]
+	if !containsStr(p4, "а сейчас?") {
+		t.Errorf("expected user text in p4, got %q", p4)
+	}
+	// Verify valid UTF-8 and json marshaling
+	if !utf8.ValidString(p4) {
+		t.Fatalf("p4 contains invalid UTF-8!")
+	}
+	if _, err := json.Marshal(p4); err != nil {
+		t.Fatalf("json.Marshal failed on p4: %v", err)
+	}
+}
+
+// TestAdminWhitelistAndBotGreeting verifies:
+// 1. Root chat ownership by admin
+// 2. Non-admin cannot execute administrative commands
+// 3. /allow adds user, creates dedicated chat, and proactively sends welcome message to the user
+// 4. Whitelisted user chatting in their dedicated chat works
+// 5. Whitelisted user writing to root chat is redirected to their personal chat
+// 6. /whitelist shows allowed users
+// 7. /revoke removes access
+func TestAdminWhitelistAndBotGreeting(t *testing.T) {
+	b, mockL, mockA, store, initialID, adminHash := setupTestBridge(t)
+	defer b.Close()
+
+	initialHash := initialID.DestinationHashFor(reticulumLxmf.FullName())
+	userHash := []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00}
+	userHex := hex.EncodeToString(userHash)
+
+	// 1. Admin messages initial chat to claim ownership & admin role
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: adminHash,
+		MessageID:  []byte("admin-init"),
+		Title:      "Hello",
+		Content:    "Hello agent",
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		return len(mockL.getSent()) >= 1
+	})
+
+	if b.store.GetAdmin() != hex.EncodeToString(adminHash) {
+		t.Fatalf("admin not set, got %q", b.store.GetAdmin())
+	}
+
+	// 2. Non-admin tries to run /allow
+	unauthHash := []byte("unauth_user_00000000000000000000")
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: unauthHash,
+		MessageID:  []byte("unauth-allow"),
+		Title:      "Hack",
+		Content:    "/allow " + userHex,
+	})
+	time.Sleep(100 * time.Millisecond)
+	sent := mockL.getSent()
+	last := sent[len(sent)-1]
+	// Root chat belongs to admin, so unauth cannot message root chat
+	if !containsStr(last.Content, "belongs to another user") && !containsStr(last.Content, "Permission denied") {
+		t.Fatalf("expected rejection for unauth user, got: %q", last.Content)
+	}
+
+	// 3. Admin runs /whitelist before any allowed users
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: adminHash,
+		MessageID:  []byte("admin-wl-1"),
+		Title:      "Command",
+		Content:    "/whitelist",
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		sent := mockL.getSent()
+		return containsStr(sent[len(sent)-1].Content, "Whitelist is empty")
+	})
+
+	// 4. Admin runs /allow <userHex>
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: adminHash,
+		MessageID:  []byte("admin-allow-cmd"),
+		Title:      "Command",
+		Content:    "/allow " + userHex,
+	})
+
+	// Wait for bot to:
+	// a) Proactively send greeting to user from new dedicated chat
+	// b) Send confirmation to admin
+	waitFor(t, 2*time.Second, func() bool {
+		allSent := mockL.getSent()
+		hasGreetingToUser := false
+		hasAdminConfirm := false
+		for _, s := range allSent {
+			if bytes.Equal(s.To, userHash) && containsStr(s.Content, "Started a new conversation") {
+				hasGreetingToUser = true
+			}
+			if bytes.Equal(s.To, adminHash) && containsStr(s.Content, "Added user") {
+				hasAdminConfirm = true
+			}
+		}
+		return hasGreetingToUser && hasAdminConfirm
+	})
+
+	// Verify user is in allowlist in store
+	if !store.IsAllowed(userHex) {
+		t.Fatalf("userHex not allowed in store after /allow")
+	}
+
+	// Find the dedicated chat created for user
+	userChats := store.GetIdentitiesForOwner(userHex)
+	if len(userChats) != 1 {
+		t.Fatalf("expected 1 dedicated chat for user, got %d", len(userChats))
+	}
+	userChatHash, _ := hex.DecodeString(userChats[0].Hash)
+
+	// 5. User sends message to their dedicated chat
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  userChatHash,
+		SenderHash: userHash,
+		MessageID:  []byte("user-msg-1"),
+		Title:      "Question",
+		Content:    "Hello from invited user",
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		for _, s := range mockL.getSent() {
+			if bytes.Equal(s.To, userHash) && containsStr(s.Content, "Agent reply: Hello from invited user") {
+				return true
+			}
+		}
+		return false
+	})
+
+	// 6. User attempts to write to root chat (owned by admin)
+	preCount := len(mockA.getPrompts())
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: userHash,
+		MessageID:  []byte("user-root-msg"),
+		Title:      "Wrong chat",
+		Content:    "Can I talk in root?",
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		allSent := mockL.getSent()
+		last := allSent[len(allSent)-1]
+		return bytes.Equal(last.To, userHash) && containsStr(last.Content, "belongs to another user")
+	})
+	if len(mockA.getPrompts()) != preCount {
+		t.Fatalf("prompt was executed for message sent to someone else's chat!")
+	}
+
+	// 7. Admin checks /whitelist
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: adminHash,
+		MessageID:  []byte("admin-wl-2"),
+		Title:      "Command",
+		Content:    "/whitelist",
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		allSent := mockL.getSent()
+		last := allSent[len(allSent)-1]
+		return bytes.Equal(last.To, adminHash) && containsStr(last.Content, userHex)
+	})
+
+	// 8. Admin revokes access: /revoke <userHex>
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  initialHash,
+		SenderHash: adminHash,
+		MessageID:  []byte("admin-revoke-cmd"),
+		Title:      "Command",
+		Content:    "/revoke " + userHex,
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		allSent := mockL.getSent()
+		last := allSent[len(allSent)-1]
+		return bytes.Equal(last.To, adminHash) && containsStr(last.Content, "removed from whitelist")
+	})
+
+	if store.IsAllowed(userHex) {
+		t.Fatalf("userHex still allowed after /revoke")
+	}
+
+	// 9. Revoked user attempts to message their chat again -> rejected by allowlist
+	promptsBefore := len(mockA.getPrompts())
+	mockL.handler(&lxmf.InboundMessage{
+		LocalHash:  userChatHash,
+		SenderHash: userHash,
+		MessageID:  []byte("user-msg-after-revoke"),
+		Title:      "Hello",
+		Content:    "Am I still here?",
+	})
+	time.Sleep(150 * time.Millisecond)
+	if len(mockA.getPrompts()) != promptsBefore {
+		t.Fatalf("revoked user's message was processed by agent!")
 	}
 }

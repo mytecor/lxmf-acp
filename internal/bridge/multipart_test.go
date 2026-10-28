@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"sync"
@@ -12,7 +13,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/mytecor/lxmf-acp/internal/lxmf"
+	"github.com/mytecor/lxmf-acp/internal/storage"
 	reticulumLxmf "github.com/thatSFguy/reticulum-go/lxmf"
+	"github.com/thatSFguy/reticulum-go/rns"
 )
 
 // ---------- helpers ----------
@@ -589,10 +592,24 @@ func TestConcurrentChatsDoNotMix(t *testing.T) {
 	}
 
 	// Outbound: two chats stream in parallel with slow deliveries.
-	b, mockL, mockA, _, initialID, user := setupTestBridge(t)
+	b, mockL, mockA, store, initialID, user := setupTestBridge(t)
 	defer b.Close()
 	local := initialID.DestinationHashFor(reticulumLxmf.FullName())
 	user2 := []byte("user2_destination_hash1234567890")
+
+	// Create dedicated chat for user2 (since every chat has its own author)
+	user2ID, err := rns.NewIdentity()
+	if err != nil {
+		t.Fatalf("failed to create identity: %v", err)
+	}
+	local2 := user2ID.DestinationHashFor(reticulumLxmf.FullName())
+	_ = mockL.RegisterIdentity(user2ID)
+	_ = store.SaveIdentity(storage.IdentityRecord{
+		Hash:       hex.EncodeToString(local2),
+		PrivateKey: hex.EncodeToString(user2ID.PrivateKey()),
+		Owner:      hex.EncodeToString(user2),
+		CreatedAt:  time.Now(),
+	})
 
 	var inflight sync.Map
 	var overlap atomic.Bool
@@ -616,7 +633,7 @@ func TestConcurrentChatsDoNotMix(t *testing.T) {
 		return "end_turn", nil
 	})
 	sendUserMessage(mockL, local, user, "u1", "AAAA")
-	sendUserMessage(mockL, local, user2, "u2", "BBBB")
+	sendUserMessage(mockL, local2, user2, "u2", "BBBB")
 
 	byPeer := func(peer []byte) []sentMsg {
 		var out []sentMsg

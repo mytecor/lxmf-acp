@@ -16,6 +16,7 @@ package lxmf
 import (
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -248,6 +249,31 @@ func WithReplyTo(fields map[any]any, replyTo []byte, replyQuote string) map[any]
 		out[FieldReplyQuote] = replyQuote
 	}
 	return out
+}
+
+// MakeQuoteSnippet creates a clean, bounded quote snippet for FIELD_REPLY_QUOTE.
+func MakeQuoteSnippet(text string, maxLen int) string {
+	text = strings.ToValidUTF8(strings.TrimSpace(text), "")
+	if text == "" {
+		return ""
+	}
+	if maxLen <= 0 {
+		maxLen = 120
+	}
+	lines := strings.Split(text, "\n")
+	var nonEmpties []string
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			nonEmpties = append(nonEmpties, l)
+		}
+	}
+	joined := strings.Join(nonEmpties, " ")
+	runes := []rune(joined)
+	if len(runes) > maxLen {
+		return string(runes[:maxLen-3]) + "..."
+	}
+	return joined
 }
 
 // intKey normalises msgpack-decoded integer keys (int8, uint8, int64, ...)
