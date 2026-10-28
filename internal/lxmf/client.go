@@ -70,11 +70,15 @@ type Client struct {
 	displayName string
 	initialID   *rns.Identity
 
-	mu         sync.RWMutex
-	transport  *rns.Transport
-	tcpIface   *rns.ReconnectingTCPClient
-	deliveries map[string]*lxmf.Delivery
-	identities map[string]*rns.Identity
+	mu              sync.RWMutex
+	transport       *rns.Transport
+	tcpIface        *rns.ReconnectingTCPClient
+	deliveries      map[string]*lxmf.Delivery
+	identities      map[string]*rns.Identity
+	lastActivity    map[string]time.Time
+	linkIdleTimeout time.Duration
+	chatIdleTimeout time.Duration
+	cancel          context.CancelFunc
 
 	OnMessage  MessageHandler
 	OnError    func(error)
@@ -87,17 +91,42 @@ func NewClient(rnsAddr string, displayName string, identity *rns.Identity) (*Cli
 	}
 
 	c := &Client{
-		rnsAddr:     rnsAddr,
-		displayName: displayName,
-		initialID:   identity,
-		deliveries:  make(map[string]*lxmf.Delivery),
-		identities:  make(map[string]*rns.Identity),
+		rnsAddr:         rnsAddr,
+		displayName:     displayName,
+		initialID:       identity,
+		deliveries:      make(map[string]*lxmf.Delivery),
+		identities:      make(map[string]*rns.Identity),
+		lastActivity:    make(map[string]time.Time),
+		linkIdleTimeout: 2 * time.Minute,
+		chatIdleTimeout: 24 * time.Hour,
 	}
 
 	initialHash := identity.DestinationHashFor(lxmf.FullName())
 	c.identities[hex.EncodeToString(initialHash)] = identity
+	c.lastActivity[hex.EncodeToString(initialHash)] = time.Now()
 
 	return c, nil
+}
+
+// ConfigureLifecycle must be called before Start. A zero chat timeout keeps
+// periodic announces enabled for every identity.
+func (c *Client) ConfigureLifecycle(linkIdle, chatIdle time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if linkIdle > 0 {
+		c.linkIdleTimeout = linkIdle
+	}
+	c.chatIdleTimeout = chatIdle
+}
+
+func (c *Client) SetIdentityLastActivity(destHash []byte, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastActivity[hex.EncodeToString(destHash)] = at
+}
+
+func (c *Client) touchIdentity(destHash []byte) {
+	c.SetIdentityLastActivity(destHash, time.Now())
 }
 
 func (c *Client) SetMessageHandler(h MessageHandler) {
@@ -113,16 +142,23 @@ func (c *Client) SetAnnounceHandler(h func(*rns.Announce)) {
 }
 
 func (c *Client) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
 	log.Printf("[LXMF] Connecting to Reticulum instance at %s...", c.rnsAddr)
 
 	tcpIface, err := rns.DialReconnectingTCP(c.rnsAddr, 5*time.Second, nil)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("dial reticulum %s: %w", c.rnsAddr, err)
 	}
 	c.tcpIface = tcpIface
 
 	c.transport = rns.NewTransport(nil)
 	c.transport.AddInterface(tcpIface)
+	// The library's keepalives refresh its idle clock. Put keepalive after
+	// the idle deadline so unused outbound links expire instead of pinging forever.
+	sweep := min(15*time.Second, c.linkIdleTimeout)
+	c.transport.SetLinkLifetime(c.linkIdleTimeout*2, c.linkIdleTimeout, sweep)
 
 	c.transport.RegisterAnnounceHandler(&clientAnnounceHandler{
 		onAnnounce: func(a *rns.Announce) {
@@ -139,6 +175,7 @@ func (c *Client) Start(ctx context.Context) error {
 	for _, id := range c.identities {
 		if err := c.registerDeliveryLocked(id); err != nil {
 			c.mu.Unlock()
+			cancel()
 			tcpIface.Close()
 			return fmt.Errorf("register delivery: %w", err)
 		}
@@ -146,9 +183,10 @@ func (c *Client) Start(ctx context.Context) error {
 	c.mu.Unlock()
 
 	go c.transport.Run(ctx)
+	go c.transport.RunLinkSweeper(ctx)
 
-	// Send initial announce for all registered identities
-	c.AnnounceAll()
+	// Restored dormant identities must also stay quiet across restarts.
+	c.announceActive()
 
 	// Periodic announce loop
 	go func() {
@@ -160,7 +198,7 @@ func (c *Client) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				c.AnnounceAll()
+				c.announceActive()
 			}
 		}
 	}()
@@ -226,6 +264,9 @@ func (c *Client) registerDeliveryLocked(id *rns.Identity) error {
 
 	c.deliveries[hexKey] = delivery
 	c.identities[hexKey] = id
+	if _, ok := c.lastActivity[hexKey]; !ok {
+		c.lastActivity[hexKey] = time.Now()
+	}
 	return nil
 }
 
@@ -288,6 +329,26 @@ func (c *Client) AnnounceAll() {
 	}
 }
 
+// Dormant identities remain registered and answer Reticulum path requests.
+// Only unsolicited periodic announcements stop; the root stays discoverable.
+func (c *Client) activeAnnounceHashes(now time.Time) [][]byte {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var hashes [][]byte
+	for key, id := range c.identities {
+		if id == c.initialID || c.chatIdleTimeout == 0 || now.Sub(c.lastActivity[key]) < c.chatIdleTimeout {
+			hashes = append(hashes, id.DestinationHashFor(lxmf.FullName()))
+		}
+	}
+	return hashes
+}
+
+func (c *Client) announceActive() {
+	for _, hash := range c.activeAnnounceHashes(time.Now()) {
+		c.AnnounceIdentity(hash)
+	}
+}
+
 // Announce broadcasts an announce packet for the initial identity.
 func (c *Client) Announce() {
 	c.AnnounceIdentity(c.Hash())
@@ -295,6 +356,8 @@ func (c *Client) Announce() {
 
 // SendFrom sends an LXMF message originating from the specified local destination identity.
 func (c *Client) SendFrom(localDestHash, recipientHash []byte, title, content string) error {
+	c.touchIdentity(localDestHash)
+	defer c.touchIdentity(localDestHash)
 	c.mu.RLock()
 	localHex := hex.EncodeToString(localDestHash)
 	delivery, ok := c.deliveries[localHex]
@@ -324,6 +387,8 @@ func (c *Client) SendFrom(localDestHash, recipientHash []byte, title, content st
 // the recipient's delivery proof has arrived (state DELIVERED); a message
 // that merely left the local interface (SENT) is not reported as success.
 func (c *Client) SendMessage(localDestHash, recipientHash []byte, m OutboundMessage) ([]byte, error) {
+	c.touchIdentity(localDestHash)
+	defer c.touchIdentity(localDestHash)
 	c.mu.RLock()
 	localHex := hex.EncodeToString(localDestHash)
 	delivery, ok := c.deliveries[localHex]
@@ -440,6 +505,9 @@ func (c *Client) HexHash() string {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
+	}
 	if c.tcpIface != nil {
 		return c.tcpIface.Close()
 	}

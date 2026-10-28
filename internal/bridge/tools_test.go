@@ -155,8 +155,8 @@ func TestToolCommandsAndPromptIntegration(t *testing.T) {
 		return "end_turn", nil
 	}}
 	q.processMessage(&lxmf.InboundMessage{LocalHash: local, SenderHash: peer, Content: "go"})
-	q.processMessage(&lxmf.InboundMessage{Content: "/tool 1"})
-	q.processMessage(&lxmf.InboundMessage{Content: "/tools off"})
+	q.processMessage(&lxmf.InboundMessage{Content: "/bridge tool 1"})
+	q.processMessage(&lxmf.InboundMessage{Content: "/bridge tools off"})
 	key := q.localHex + ":" + q.peerHex
 	if store.ToolMode(key) != "off" {
 		t.Fatal("preference not saved")
@@ -167,7 +167,7 @@ func TestToolCommandsAndPromptIntegration(t *testing.T) {
 	}
 	// A second chat cannot access the first chat's tool record.
 	q.peerHex = "other"
-	q.processMessage(&lxmf.InboundMessage{Content: "/tool 1"})
+	q.processMessage(&lxmf.InboundMessage{Content: "/bridge tool 1"})
 	sent = client.getSent()
 	if !strings.Contains(sent[len(sent)-1].Content, "Tool not found") {
 		t.Fatal("details leaked across chats")

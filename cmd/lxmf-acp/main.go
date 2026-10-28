@@ -45,6 +45,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Fatal: failed to create LXMF client: %v", err)
 	}
+	lxmfClient.ConfigureLifecycle(cfg.LinkIdleTimeout, cfg.ChatIdleTimeout)
 	log.Printf("RNS Shared:    %s", cfg.RNSAddr)
 	log.Printf("Display Name:  %q", cfg.DisplayName)
 	log.Printf("Agent Address: %s", lxmfClient.HexHash())

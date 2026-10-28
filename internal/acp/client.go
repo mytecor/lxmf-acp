@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	acpwire "github.com/ironpark/acp-go"
 	"github.com/ironpark/acp-go/acp1"
 	"github.com/ironpark/acp-go/acphttp"
 	schema "github.com/ironpark/acp-go/schema/v1"
@@ -60,6 +61,13 @@ func (h *clientHandler) RequestPermission(_ context.Context, params *acp1.Reques
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.agent != nil {
+		select {
+		case <-c.agent.Done():
+		default:
+			return nil
+		}
+	}
 
 	log.Printf("[ACP] Dialing WebSocket to agent endpoint: %s", c.endpoint)
 	wsTransport, err := acphttp.DialWebSocket(ctx, c.endpoint)
@@ -95,12 +103,44 @@ func (c *Client) Connect(ctx context.Context) error {
 func (c *Client) EnsureConnected(ctx context.Context) error {
 	c.mu.RLock()
 	if c.agent != nil {
-		c.mu.RUnlock()
-		return nil
+		select {
+		case <-c.agent.Done():
+		default:
+			c.mu.RUnlock()
+			return nil
+		}
 	}
 	c.mu.RUnlock()
 
 	return c.Connect(ctx)
+}
+
+// DetachSession releases only our Hydra subscription. The daemon owns agent
+// idle shutdown and persistent history; other ACP agents need no extension.
+func (c *Client) DetachSession(ctx context.Context, sessionID string) error {
+	c.mu.RLock()
+	agent := c.agent
+	info := c.initialized.GetAgentInfo()
+	c.mu.RUnlock()
+	if agent == nil || info == nil || (info.Name != "hydra" && info.Name != "hydra-acp") {
+		return nil
+	}
+	select {
+	case <-agent.Done():
+		return nil
+	default:
+	}
+	_, err := agent.ExtMethod(ctx, "session/detach", map[string]string{"sessionId": sessionID})
+	var rpcErr *acpwire.RequestError
+	// Hydra may already have closed this session on its own idle timer.
+	if errors.As(err, &rpcErr) && (rpcErr.Code == -32001 || rpcErr.Code == acpwire.ErrorCodeMethodNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("detach session %s: %w", sessionID, err)
+	}
+	log.Printf("[ACP] Detached idle session %s", sessionID)
+	return nil
 }
 
 func (c *Client) CreateSession(ctx context.Context) (string, error) {

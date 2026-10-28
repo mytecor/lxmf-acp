@@ -1,7 +1,9 @@
 package config
 
 import (
+	"flag"
 	"testing"
+	"time"
 )
 
 func TestIsAllowed(t *testing.T) {
@@ -22,6 +24,37 @@ func TestIsAllowed(t *testing.T) {
 	openCfg := &Config{Allowlist: nil}
 	if !openCfg.IsAllowed("anyhex") {
 		t.Errorf("expected empty allowlist to allow all")
+	}
+}
+
+func TestLifecycleEnvironmentAndExplicitFlagPrecedence(t *testing.T) {
+	old := flag.CommandLine
+	defer func() { flag.CommandLine = old }()
+	flag.CommandLine = flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := &Config{LinkIdleTimeout: 2 * time.Minute, QueueIdleTimeout: 5 * time.Minute, ChatIdleTimeout: 24 * time.Hour}
+	flag.DurationVar(&cfg.LinkIdleTimeout, "link-idle-timeout", cfg.LinkIdleTimeout, "")
+	flag.DurationVar(&cfg.QueueIdleTimeout, "queue-idle-timeout", cfg.QueueIdleTimeout, "")
+	flag.DurationVar(&cfg.ChatIdleTimeout, "chat-idle-timeout", cfg.ChatIdleTimeout, "")
+	t.Setenv("LXMF_ACP_LINK_IDLE_TIMEOUT", "3m")
+	t.Setenv("LXMF_ACP_QUEUE_IDLE_TIMEOUT", "1h")
+	t.Setenv("LXMF_ACP_CHAT_IDLE_TIMEOUT", "0")
+	// An explicit default value must still override the environment.
+	if err := flag.CommandLine.Parse([]string{"--queue-idle-timeout=5m"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyLifecycleEnv(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LinkIdleTimeout != 3*time.Minute || cfg.QueueIdleTimeout != 5*time.Minute || cfg.ChatIdleTimeout != 0 {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	t.Setenv("LXMF_ACP_LINK_IDLE_TIMEOUT", "0")
+	if err := applyLifecycleEnv(cfg); err == nil {
+		t.Fatal("zero link timeout accepted")
+	}
+	t.Setenv("LXMF_ACP_LINK_IDLE_TIMEOUT", "invalid")
+	if err := applyLifecycleEnv(cfg); err == nil {
+		t.Fatal("invalid timeout accepted")
 	}
 }
 

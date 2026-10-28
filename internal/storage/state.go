@@ -14,11 +14,12 @@ import (
 )
 
 type IdentityRecord struct {
-	Hash       string    `json:"hash"`
-	PrivateKey string    `json:"privateKey"`
-	Owner      string    `json:"owner"`
-	SessionID  string    `json:"sessionId,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
+	Hash           string    `json:"hash"`
+	PrivateKey     string    `json:"privateKey"`
+	Owner          string    `json:"owner"`
+	SessionID      string    `json:"sessionId,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	LastActivityAt time.Time `json:"lastActivityAt,omitempty"`
 }
 
 type SessionEntry struct {
@@ -111,6 +112,35 @@ func (s *Store) load() error {
 	}
 	if loaded.KnownIdentities == nil {
 		loaded.KnownIdentities = make(map[string]*rns.KnownIdentity)
+	}
+	// Older state files have no activity timestamp. Recover the best available
+	// date instead of making every restored address look newly active.
+	legacy := make(map[string]bool)
+	for key, rec := range loaded.Identities {
+		if rec.LastActivityAt.IsZero() {
+			legacy[key] = true
+			rec.LastActivityAt = rec.CreatedAt
+			loaded.Identities[key] = rec
+		}
+	}
+	recoverActivity := func(local string, at time.Time) {
+		if !legacy[local] {
+			return
+		}
+		rec := loaded.Identities[local]
+		if at.After(rec.LastActivityAt) {
+			rec.LastActivityAt = at
+			loaded.Identities[local] = rec
+		}
+	}
+	for _, entry := range loaded.Sessions {
+		recoverActivity(entry.LocalDestination, entry.UpdatedAt)
+	}
+	for _, entry := range loaded.Messages {
+		local, _, ok := strings.Cut(entry.ChatKey, ":")
+		if ok {
+			recoverActivity(local, entry.Timestamp)
+		}
 	}
 	s.data = loaded
 	return nil
@@ -220,6 +250,19 @@ func (s *Store) GetIdentity(localHex string) (IdentityRecord, bool) {
 
 	entry, ok := s.data.Identities[localHex]
 	return entry, ok
+}
+
+// TouchIdentity tracks real chat activity independently of ACP session creation.
+func (s *Store) TouchIdentity(localHex string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.data.Identities[localHex]
+	if !ok || !at.After(rec.LastActivityAt) {
+		return nil
+	}
+	rec.LastActivityAt = at
+	s.data.Identities[localHex] = rec
+	return s.saveLocked()
 }
 
 func (s *Store) GetAllIdentities() []IdentityRecord {

@@ -171,6 +171,7 @@ func (m *mockLXMF) KnownSnapshot() []*rns.KnownIdentity                    { ret
 func (m *mockLXMF) PinDestinations(destHashes [][]byte)                    {}
 func (m *mockLXMF) RequestPath(destHash []byte) error                      { return nil }
 func (m *mockLXMF) SetAnnounceHandler(h func(*rns.Announce))               {}
+func (m *mockLXMF) SetIdentityLastActivity([]byte, time.Time)              {}
 
 func (m *mockLXMF) getSent() []sentMsg {
 	m.mu.Lock()
@@ -333,7 +334,7 @@ func setupTestBridge(t *testing.T) (*Bridge, *mockLXMF, *mockACP, *storage.Store
 	return b, mockL, mockA, store, initialID, userHash
 }
 
-// Scenario 1: /new from initial chat creates a new identity and independent ACP session.
+// Scenario 1: /bridge new from initial chat creates a new identity and independent ACP session.
 func TestScenario1_NewFromInitialChat(t *testing.T) {
 	b, mockL, mockA, store, initialID, userHash := setupTestBridge(t)
 	defer b.Close()
@@ -360,13 +361,13 @@ func TestScenario1_NewFromInitialChat(t *testing.T) {
 		t.Fatalf("expected session-1 in initial chat, got %q, %v", sess1, ok)
 	}
 
-	// 2. Send /new from initial chat
+	// 2. Send /bridge new from initial chat
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  []byte("cmd-new-1"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 
 	// Wait until new identity is created and welcome message is sent
@@ -404,11 +405,11 @@ func TestScenario1_NewFromInitialChat(t *testing.T) {
 		t.Fatalf("welcome message recipient %s, want %s", hex.EncodeToString(welcome.To), userHex)
 	}
 
-	// Verify ACP agent was NOT called with /new
+	// Verify ACP agent was NOT called with /bridge new
 	for sessID, prompts := range mockA.prompts {
 		for _, p := range prompts {
-			if p == "/new" {
-				t.Fatalf("/new was sent to ACP agent session %s!", sessID)
+			if p == "/bridge new" {
+				t.Fatalf("/bridge new was sent to ACP agent session %s!", sessID)
 			}
 		}
 	}
@@ -436,7 +437,7 @@ func TestScenario1_NewFromInitialChat(t *testing.T) {
 	}
 }
 
-// Scenario 2: /new from a newly created chat behaves identically, without inheriting context.
+// Scenario 2: /bridge new from a newly created chat behaves identically, without inheriting context.
 func TestScenario2_NewFromDynamicChat(t *testing.T) {
 	b, mockL, mockA, store, initialID, userHash := setupTestBridge(t)
 	defer b.Close()
@@ -445,13 +446,13 @@ func TestScenario2_NewFromDynamicChat(t *testing.T) {
 	initialHex := hex.EncodeToString(initialHash)
 	userHex := hex.EncodeToString(userHash)
 
-	// Create first dynamic chat via /new
+	// Create first dynamic chat via /bridge new
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  []byte("cmd-new-1"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 
 	waitFor(t, 2*time.Second, func() bool {
@@ -482,13 +483,13 @@ func TestScenario2_NewFromDynamicChat(t *testing.T) {
 	})
 	sessChat1, _ := store.GetSession(chat1Hex, userHex)
 
-	// Now send /new FROM chat1!
+	// Now send /bridge new FROM chat1!
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  chat1Hash,
 		SenderHash: userHash,
 		MessageID:  []byte("cmd-new-2"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 
 	// Wait for 3rd identity to be created
@@ -499,7 +500,7 @@ func TestScenario2_NewFromDynamicChat(t *testing.T) {
 	// chat1 session must remain unchanged
 	sessChat1After, _ := store.GetSession(chat1Hex, userHex)
 	if sessChat1After != sessChat1 {
-		t.Fatalf("chat1 session was altered by /new! got %s, want %s", sessChat1After, sessChat1)
+		t.Fatalf("chat1 session was altered by /bridge new! got %s, want %s", sessChat1After, sessChat1)
 	}
 
 	// Find the 3rd identity
@@ -571,13 +572,13 @@ func TestScenario3_RestartRestoresIdentitiesAndRecoversACPSessions(t *testing.T)
 		t.Fatalf("b1.Start failed: %v", err)
 	}
 
-	// Create a chat via /new
+	// Create a chat via /bridge new
 	mockL1.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  []byte("cmd-new-1"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 
 	waitFor(t, 2*time.Second, func() bool {
@@ -686,7 +687,7 @@ func TestScenario3_RestartRestoresIdentitiesAndRecoversACPSessions(t *testing.T)
 	}
 }
 
-// Scenario 4: Re-delivery of the same /new command does not create an extra chat.
+// Scenario 4: Re-delivery of the same /bridge new command does not create an extra chat.
 func TestScenario4_DuplicateNewCommandDoesNotCreateDuplicateChat(t *testing.T) {
 	b, mockL, _, _, initialID, userHash := setupTestBridge(t)
 	defer b.Close()
@@ -695,33 +696,33 @@ func TestScenario4_DuplicateNewCommandDoesNotCreateDuplicateChat(t *testing.T) {
 
 	duplicateMsgID := []byte("duplicate-message-id-1234567890123456")
 
-	// First delivery of /new
+	// First delivery of /bridge new
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  duplicateMsgID,
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 
 	waitFor(t, 2*time.Second, func() bool {
 		return mockL.identityCount() == 2
 	})
 
-	// Second delivery of identical /new (same message ID)
+	// Second delivery of identical /bridge new (same message ID)
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  duplicateMsgID,
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 
 	time.Sleep(150 * time.Millisecond)
 
 	// Identity count must remain 2!
 	if mockL.identityCount() != 2 {
-		t.Fatalf("duplicate /new created additional identity! got %d identities, want 2", mockL.identityCount())
+		t.Fatalf("duplicate /bridge new created additional identity! got %d identities, want 2", mockL.identityCount())
 	}
 }
 
@@ -739,7 +740,7 @@ func TestOwnerIsolation(t *testing.T) {
 		SenderHash: user1Hash,
 		MessageID:  []byte("new-1"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 
 	waitFor(t, 2*time.Second, func() bool {
@@ -788,7 +789,7 @@ func TestWelcomeDeliveryFailureReportsDestinationInSourceChat(t *testing.T) {
 		SenderHash: userHash,
 		MessageID:  []byte("cmd-new-fail"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 
 	waitFor(t, 2*time.Second, func() bool {
@@ -842,31 +843,31 @@ func TestRateLimitingAndQuota(t *testing.T) {
 	_ = b.Start(context.Background())
 	defer b.Close()
 
-	// 1st /new -> succeeds
+	// 1st /bridge new -> succeeds
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  []byte("new-1"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 	waitFor(t, 2*time.Second, func() bool {
 		return mockL.identityCount() == 2
 	})
 
-	// 2nd /new immediately -> triggers rate limit!
+	// 2nd /bridge new immediately -> triggers rate limit!
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  []byte("new-2"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 	time.Sleep(150 * time.Millisecond)
 
 	// Should not have created a 3rd identity
 	if mockL.identityCount() != 2 {
-		t.Fatalf("rate limit did not block second /new! count = %d", mockL.identityCount())
+		t.Fatalf("rate limit did not block second /bridge new! count = %d", mockL.identityCount())
 	}
 
 	// Verify rate limit message was sent
@@ -881,13 +882,13 @@ func TestRateLimitingAndQuota(t *testing.T) {
 	b.lastNewChat[hex.EncodeToString(userHash)] = time.Now().Add(-10 * time.Second)
 	b.rateMu.Unlock()
 
-	// 2nd /new after cooldown -> succeeds (count becomes 3 = initial + 2 dynamic)
+	// 2nd /bridge new after cooldown -> succeeds (count becomes 3 = initial + 2 dynamic)
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  []byte("new-3"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 	waitFor(t, 2*time.Second, func() bool {
 		return mockL.identityCount() == 3
@@ -898,19 +899,19 @@ func TestRateLimitingAndQuota(t *testing.T) {
 	b.lastNewChat[hex.EncodeToString(userHash)] = time.Now().Add(-10 * time.Second)
 	b.rateMu.Unlock()
 
-	// 3rd /new -> exceeds quota of 2!
+	// 3rd /bridge new -> exceeds quota of 2!
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: userHash,
 		MessageID:  []byte("new-4"),
 		Title:      "Command",
-		Content:    "/new",
+		Content:    "/bridge new",
 	})
 	time.Sleep(150 * time.Millisecond)
 
 	// Count must still be 3
 	if mockL.identityCount() != 3 {
-		t.Fatalf("quota did not block third /new! count = %d", mockL.identityCount())
+		t.Fatalf("quota did not block third /bridge new! count = %d", mockL.identityCount())
 	}
 
 	sent = mockL.getSent()
@@ -1089,11 +1090,11 @@ func TestReplyHandling(t *testing.T) {
 // TestAdminWhitelistAndBotGreeting verifies:
 // 1. Root chat ownership by admin
 // 2. Non-admin cannot execute administrative commands
-// 3. /allow adds user, creates dedicated chat, and proactively sends welcome message to the user
+// 3. /bridge allow adds user, creates dedicated chat, and proactively sends welcome message to the user
 // 4. Whitelisted user chatting in their dedicated chat works
 // 5. Whitelisted user writing to root chat is redirected to their personal chat
-// 6. /whitelist shows allowed users
-// 7. /revoke removes access
+// 6. /bridge whitelist shows allowed users
+// 7. /bridge revoke removes access
 func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 	b, mockL, mockA, store, initialID, adminHash := setupTestBridge(t)
 	defer b.Close()
@@ -1118,14 +1119,14 @@ func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 		t.Fatalf("admin not set, got %q", b.store.GetAdmin())
 	}
 
-	// 2. Non-admin tries to run /allow
+	// 2. Non-admin tries to run /bridge allow
 	unauthHash := []byte("unauth_user_00000000000000000000")
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: unauthHash,
 		MessageID:  []byte("unauth-allow"),
 		Title:      "Hack",
-		Content:    "/allow " + userHex,
+		Content:    "/bridge allow " + userHex,
 	})
 	time.Sleep(100 * time.Millisecond)
 	sent := mockL.getSent()
@@ -1135,26 +1136,26 @@ func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 		t.Fatalf("expected rejection for unauth user, got: %q", last.Content)
 	}
 
-	// 3. Admin runs /whitelist before any allowed users
+	// 3. Admin runs /bridge whitelist before any allowed users
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: adminHash,
 		MessageID:  []byte("admin-wl-1"),
 		Title:      "Command",
-		Content:    "/whitelist",
+		Content:    "/bridge whitelist",
 	})
 	waitFor(t, 2*time.Second, func() bool {
 		sent := mockL.getSent()
 		return containsStr(sent[len(sent)-1].Content, "Whitelist is empty")
 	})
 
-	// 4. Admin runs /allow <userHex>
+	// 4. Admin runs /bridge allow <userHex>
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: adminHash,
 		MessageID:  []byte("admin-allow-cmd"),
 		Title:      "Command",
-		Content:    "/allow " + userHex,
+		Content:    "/bridge allow " + userHex,
 	})
 
 	// Wait for bot to:
@@ -1177,7 +1178,7 @@ func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 
 	// Verify user is in allowlist in store
 	if !store.IsAllowed(userHex) {
-		t.Fatalf("userHex not allowed in store after /allow")
+		t.Fatalf("userHex not allowed in store after /bridge allow")
 	}
 
 	// Find the dedicated chat created for user
@@ -1222,13 +1223,13 @@ func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 		t.Fatalf("prompt was executed for message sent to someone else's chat!")
 	}
 
-	// 7. Admin checks /whitelist
+	// 7. Admin checks /bridge whitelist
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: adminHash,
 		MessageID:  []byte("admin-wl-2"),
 		Title:      "Command",
-		Content:    "/whitelist",
+		Content:    "/bridge whitelist",
 	})
 	waitFor(t, 2*time.Second, func() bool {
 		allSent := mockL.getSent()
@@ -1236,13 +1237,13 @@ func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 		return bytes.Equal(last.To, adminHash) && containsStr(last.Content, userHex)
 	})
 
-	// 8. Admin revokes access: /revoke <userHex>
+	// 8. Admin revokes access: /bridge revoke <userHex>
 	mockL.handler(&lxmf.InboundMessage{
 		LocalHash:  initialHash,
 		SenderHash: adminHash,
 		MessageID:  []byte("admin-revoke-cmd"),
 		Title:      "Command",
-		Content:    "/revoke " + userHex,
+		Content:    "/bridge revoke " + userHex,
 	})
 	waitFor(t, 2*time.Second, func() bool {
 		allSent := mockL.getSent()
@@ -1251,7 +1252,7 @@ func TestAdminWhitelistAndBotGreeting(t *testing.T) {
 	})
 
 	if store.IsAllowed(userHex) {
-		t.Fatalf("userHex still allowed after /revoke")
+		t.Fatalf("userHex still allowed after /bridge revoke")
 	}
 
 	// 9. Revoked user attempts to message their chat again -> rejected by allowlist
@@ -1298,7 +1299,7 @@ func TestAutoClaimAdminFromDynamicChat(t *testing.T) {
 		CreatedAt:  time.Now(),
 	})
 
-	// User invokes /allow from their personal chat
+	// User invokes /bridge allow from their personal chat
 	newPeerHash := []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00}
 	newPeerHex := hex.EncodeToString(newPeerHash)
 
@@ -1307,7 +1308,7 @@ func TestAutoClaimAdminFromDynamicChat(t *testing.T) {
 		SenderHash: userHash,
 		MessageID:  []byte("allow-from-dynamic"),
 		Title:      "Allow",
-		Content:    "/allow " + newPeerHex,
+		Content:    "/bridge allow " + newPeerHex,
 	})
 
 	waitFor(t, 2*time.Second, func() bool {

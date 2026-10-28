@@ -35,6 +35,7 @@ type LXMFClient interface {
 	PinDestinations(destHashes [][]byte)
 	RequestPath(destHash []byte) error
 	SetAnnounceHandler(h func(*rns.Announce))
+	SetIdentityLastActivity(destHash []byte, at time.Time)
 }
 
 type ACPClient interface {
@@ -62,11 +63,11 @@ type Bridge struct {
 	maxPartUnits int
 	maxPartBytes int
 
-	// Rate limiter for /new command: userHex -> last creation time
+	// Rate limiter for /bridge new command: userHex -> last creation time
 	rateMu      sync.Mutex
 	lastNewChat map[string]time.Time
 
-	// Deduplication for /new command: messageIDHex -> timestamp
+	// Deduplication for /bridge new command: messageIDHex -> timestamp
 	dedupMu        sync.Mutex
 	processedNewID map[string]time.Time
 }
@@ -120,6 +121,11 @@ func (b *Bridge) Start(ctx context.Context) error {
 			log.Printf("[Bridge] Warning: failed to register stored identity %s: %v", rec.Hash, err)
 			continue
 		}
+		lastActivity := rec.LastActivityAt
+		if lastActivity.IsZero() {
+			lastActivity = rec.CreatedAt
+		}
+		b.lxmfClient.SetIdentityLastActivity(id.DestinationHashFor(reticulumLxmf.FullName()), lastActivity)
 		log.Printf("[Bridge] Restored dynamic identity: %s (owner: %s)", rec.Hash, rec.Owner)
 	}
 
@@ -156,6 +162,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 
 	// 5. Register inbound message handler
+	context.AfterFunc(ctx, b.queue.Close)
 	b.lxmfClient.SetMessageHandler(func(msg *lxmf.InboundMessage) {
 		b.handleInbound(msg)
 	})
@@ -302,6 +309,13 @@ func (b *Bridge) handleInbound(msg *lxmf.InboundMessage) {
 		}
 	}
 
+	// Only accepted traffic wakes a dormant address. Multipart fragments also
+	// count, so a slow incoming transfer does not become dormant midway.
+	now := time.Now()
+	b.lxmfClient.SetIdentityLastActivity(msg.LocalHash, now)
+	if err := b.store.TouchIdentity(localHex, now); err != nil {
+		log.Printf("[Bridge] Save chat activity: %v", err)
+	}
 	chatKey := localHex + ":" + senderHex
 
 	// Record raw part into memory history cache
@@ -398,7 +412,7 @@ func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
 		b.dedupMu.Lock()
 		if _, seen := b.processedNewID[msgIDHex]; seen {
 			b.dedupMu.Unlock()
-			log.Printf("[Bridge] Duplicate /new command with message ID %s received from %s, ignoring", msgIDHex, senderHex)
+			log.Printf("[Bridge] Duplicate /bridge new command with message ID %s received from %s, ignoring", msgIDHex, senderHex)
 			return
 		}
 		b.processedNewID[msgIDHex] = time.Now()
@@ -421,7 +435,7 @@ func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
 		lastTime, exists := b.lastNewChat[senderHex]
 		if exists && time.Since(lastTime) < cooldown {
 			b.rateMu.Unlock()
-			log.Printf("[Bridge] Rate limit exceeded for /new from %s (cooldown %v)", senderHex, cooldown)
+			log.Printf("[Bridge] Rate limit exceeded for /bridge new from %s (cooldown %v)", senderHex, cooldown)
 			_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "Rate Limit", "Rate limit exceeded. Please wait before creating another chat.")
 			return
 		}
@@ -549,7 +563,7 @@ func (b *Bridge) handleAllowCommand(msg *lxmf.InboundMessage) {
 
 	parts := strings.Fields(msg.Content)
 	if len(parts) < 2 {
-		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Usage: `/allow <destination_hash>`")
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Usage: `/bridge allow <destination_hash>`")
 		return
 	}
 
@@ -591,7 +605,7 @@ func (b *Bridge) handleRevokeCommand(msg *lxmf.InboundMessage) {
 
 	parts := strings.Fields(msg.Content)
 	if len(parts) < 2 {
-		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Usage: `/revoke <destination_hash>`")
+		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "", "Usage: `/bridge revoke <destination_hash>`")
 		return
 	}
 
@@ -639,6 +653,7 @@ func (b *Bridge) handleWhitelistCommand(msg *lxmf.InboundMessage) {
 }
 
 func (b *Bridge) Close() error {
+	b.queue.Close()
 	if snapshot := b.lxmfClient.KnownSnapshot(); len(snapshot) > 0 {
 		_ = b.store.SaveKnownIdentities(snapshot)
 	}

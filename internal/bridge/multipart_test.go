@@ -696,7 +696,7 @@ func TestHelpCommandMarkdownFormatting(t *testing.T) {
 	defer b.Close()
 	local := initialID.DestinationHashFor(reticulumLxmf.FullName())
 
-	sendUserMessage(mockL, local, user, "cmd-help", "/help")
+	sendUserMessage(mockL, local, user, "cmd-help", "/bridge help")
 
 	waitFor(t, 2*time.Second, func() bool {
 		return len(mockL.getSent()) >= 1
@@ -710,7 +710,7 @@ func TestHelpCommandMarkdownFormatting(t *testing.T) {
 	if !strings.Contains(last.Content, "**LXMF-ACP Agent Bridge commands:**") {
 		t.Errorf("expected bold title in markdown help, got: %q", last.Content)
 	}
-	if !strings.Contains(last.Content, "`/new`") || !strings.Contains(last.Content, "`/cancel`") {
+	if !strings.Contains(last.Content, "`/bridge new`") || !strings.Contains(last.Content, "`/bridge cancel`") {
 		t.Errorf("expected backticks in markdown help, got: %q", last.Content)
 	}
 }

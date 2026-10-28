@@ -199,7 +199,7 @@ func (r *toolReporter) flushLocked() {
 			fields := map[any]any{lxmf.FieldCustomMeta: map[any]any{lxmf.MetaNamespace: map[any]any{
 				"version": 1, "type": "tool_calls", "turn_id": r.turnID, "sequence": r.sequence, "calls": calls,
 			}}}
-			r.stream.Notice("Tools", "Tools:\n"+strings.Join(lines, "\n")+"\nDetails: /tool <number>", fields)
+			r.stream.Notice("Tools", "Tools:\n"+strings.Join(lines, "\n")+"\nDetails: /bridge tool <number>", fields)
 		}
 		if r.overflow {
 			r.stream.Notice("Tools", "Additional tool calls omitted (turn limit: 256).", nil)
@@ -280,9 +280,9 @@ func (q *peerQueue) toolCommand(text string) bool {
 	if parts[0] == "/tools" {
 		switch {
 		case len(parts) == 1:
-			reply = "Tool display: " + q.bridge.store.ToolMode(key) + ". Usage: /tools off|compact|verbose"
+			reply = "Tool display: " + q.bridge.store.ToolMode(key) + ". Usage: /bridge tools off|compact|verbose"
 		case len(parts) != 2 || !storage.ValidToolMode(parts[1]):
-			reply = "Usage: /tools off|compact|verbose"
+			reply = "Usage: /bridge tools off|compact|verbose"
 		default:
 			if err := q.bridge.store.SetToolMode(key, parts[1]); err != nil {
 				reply = "Could not save tool display preference."
@@ -296,7 +296,7 @@ func (q *peerQueue) toolCommand(text string) bool {
 			number, _ = strconv.Atoi(parts[1])
 		}
 		if number <= 0 {
-			reply = "Usage: /tool <number>"
+			reply = "Usage: /bridge tool <number>"
 		} else if record, ok := q.bridge.store.GetTool(key, number); ok {
 			reply = toolDetails(record)
 		} else {

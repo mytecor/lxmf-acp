@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 
+	acpwire "github.com/ironpark/acp-go"
 	"github.com/mytecor/lxmf-acp/internal/storage"
 )
 
@@ -32,6 +33,11 @@ func (sm *SessionManager) GetOrCreateSession(ctx context.Context, localHex, peer
 		// If agent supports loading, attempt to verify/load
 		if sm.acpClient.CanLoadSession() {
 			if err := sm.acpClient.LoadSession(ctx, sessionID); err != nil {
+				// A transient reconnect/resurrection failure must not replace
+				// a durable conversation with a blank session.
+				if !acpwire.IsCode(err, -32001) && !acpwire.IsCode(err, acpwire.ErrorCodeResourceNotFound) {
+					return "", fmt.Errorf("load acp session %s: %w", sessionID, err)
+				}
 				log.Printf("[Bridge] Session %s for (%s, %s) failed to load (%v), creating new session...", sessionID, localHex, peerHex, err)
 				// Create new session below
 			} else {
