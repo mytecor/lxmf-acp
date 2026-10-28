@@ -269,14 +269,18 @@ func (b *Bridge) handleNewCommand(msg *lxmf.InboundMessage) {
 
 	log.Printf("[Bridge] Successfully created new chat %s for user %s (requested from chat %s)", newDestHex, senderHex, localHex)
 
-	// 7. Send welcome message from the new identity
+	// 7. Send welcome message from the new identity using reliable DIRECT delivery
 	welcomeTitle := "New Conversation"
-	welcomeContent := fmt.Sprintf("Started a new conversation with %s. Send a message to begin.", b.cfg.DisplayName)
-	err = b.lxmfClient.SendFrom(newDestHash, msg.SenderHash, welcomeTitle, welcomeContent)
+	welcomeContent := fmt.Sprintf("Started a new conversation with **%s**.\n\nSend a message to begin.", b.cfg.DisplayName)
+	_, err = b.lxmfClient.SendMessage(newDestHash, msg.SenderHash, lxmf.OutboundMessage{
+		Title:   welcomeTitle,
+		Content: welcomeContent,
+		Direct:  true,
+	})
 	if err != nil {
 		log.Printf("[Bridge] Failed to deliver welcome message from %s to %s: %v", newDestHex, senderHex, err)
-		// Upon delivery failure, report destination hash in source chat
-		errMsg := fmt.Sprintf("New chat created, but failed to deliver welcome message. Chat destination: <%s>", newDestHex)
+		// Upon delivery failure, report destination hash in source chat (wrapped in backticks so markdown does not strip it as an HTML tag)
+		errMsg := fmt.Sprintf("New chat created, but failed to deliver welcome message. Chat destination: `<%s>`", newDestHex)
 		_ = b.lxmfClient.SendFrom(msg.LocalHash, msg.SenderHash, "New Chat Info", errMsg)
 		return
 	}

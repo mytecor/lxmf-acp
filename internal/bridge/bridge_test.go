@@ -89,6 +89,17 @@ func (m *mockLXMF) SendFrom(localDestHash, recipientHash []byte, title, content 
 
 func (m *mockLXMF) SendMessage(localDestHash, recipientHash []byte, out lxmf.OutboundMessage) ([]byte, error) {
 	m.mu.Lock()
+	locHex := hex.EncodeToString(localDestHash)
+	if m.failWelcome {
+		initHex := ""
+		if m.initialID != nil {
+			initHex = hex.EncodeToString(m.initialID.DestinationHashFor(reticulumLxmf.FullName()))
+		}
+		if locHex != initHex {
+			m.mu.Unlock()
+			return nil, errors.New("simulated delivery failure")
+		}
+	}
 	m.msgCounter++
 	id := sha256.Sum256([]byte(fmt.Sprintf("msg-%d-%x", m.msgCounter, localDestHash)))
 	hook := m.sendHook
